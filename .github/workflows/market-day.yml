@@ -65,7 +65,13 @@ jobs:
 
       - name: Live refresh (prices, regime, S/R flag, Telegram alerts)
         if: steps.pre.outputs.go == 'true' && env.TASK == 'live'
-        run: python live_fvg.py once
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            python -c "import live_fvg as V; V.refresh_once(V.LR.open_sheet())"
+          else
+            python live_fvg.py once
+          fi
+
 
       - name: ATM strike + CE/PE EMA state
         if: steps.pre.outputs.go == 'true' && env.TASK == 'atm'
