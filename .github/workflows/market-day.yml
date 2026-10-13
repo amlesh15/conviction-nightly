@@ -1,0 +1,91 @@
+name: market-day
+
+on:
+  schedule:
+    - cron: "7,22,37,52 3-10 * * 1-5"   # live refresh every 15 min (UTC; = 08:37-16:22 IST, gated to market hours)
+    - cron: "50 4-9 * * 1-5"            # ATM EMA hourly at :20 IST (10:20 ... 15:20)
+    - cron: "30 11 * * 1-5"             # 1-min archive at 17:00 IST
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What to run"
+        type: choice
+        options: [live, atm, archive]
+        default: live
+      force:
+        description: "Ignore market-hours check (for testing)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: market-${{ github.event.schedule || inputs.task }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      STATE_DIR: ${{ github.workspace }}/state
+      ARCHIVE_DIR: ${{ github.workspace }}/archive_repo/data
+      FORCE: ${{ inputs.force }}
+    steps:
+      - name: Decide task
+        run: |
+          case "${{ github.event.schedule }}" in
+            "7,22,37,52 3-10 * * 1-5") echo "TASK=live" >> $GITHUB_ENV ;;
+            "50 4-9 * * 1-5")          echo "TASK=atm" >> $GITHUB_ENV ;;
+            "30 11 * * 1-5")           echo "TASK=archive" >> $GITHUB_ENV ;;
+            *)                         echo "TASK=${{ inputs.task }}" >> $GITHUB_ENV ;;
+          esac
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore small state (alert debounce)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - run: python setup_env.py
+      - name: Preflight (market hours + cookie check)
+        id: pre
+        run: python preflight.py "$TASK"
+
+      - name: Live refresh (prices, regime, S/R flag, Telegram alerts)
+        if: steps.pre.outputs.go == 'true' && env.TASK == 'live'
+        run: python live_fvg.py once
+
+      - name: ATM strike + CE/PE EMA state
+        if: steps.pre.outputs.go == 'true' && env.TASK == 'atm'
+        run: python atm_ema.py once
+
+      - name: Prepare archive branch
+        if: steps.pre.outputs.go == 'true' && env.TASK == 'archive'
+        run: |
+          URL="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git clone --depth 1 --branch archive "$URL" archive_repo || {
+            mkdir archive_repo && git -C archive_repo init -b archive && git -C archive_repo remote add origin "$URL"; }
+          mkdir -p archive_repo/data
+      - name: Capture 1-min candles
+        if: steps.pre.outputs.go == 'true' && env.TASK == 'archive'
+        run: python archive_job.py
+      - name: Save archive to the 'archive' branch
+        if: steps.pre.outputs.go == 'true' && env.TASK == 'archive'
+        run: |
+          cd archive_repo
+          git config user.name "archive-bot"; git config user.email "archive-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "nothing new to save"; else
+            git commit -m "1-min archive $(date -u +%F)" && git push origin HEAD:archive; fi
