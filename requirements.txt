@@ -1,0 +1,6 @@
+pandas
+numpy
+requests
+pyarrow
+gspread>=6.0
+google-auth
