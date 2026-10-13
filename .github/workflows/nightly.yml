@@ -1,0 +1,37 @@
+name: nightly-conviction
+
+on:
+  schedule:
+    - cron: "30 14 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      full_rebuild:
+        description: "Rebuild masterdata from scratch (slow)"
+        type: boolean
+        default: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: fno_cache
+          key: fno-${{ github.run_id }}
+          restore-keys: fno-
+      - name: Build and publish
+        env:
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          START_DATE: ${{ vars.START_DATE || '2023-08-01' }}
+          FULL_REBUILD: ${{ inputs.full_rebuild }}
+          CACHE_DIR: ${{ github.workspace }}/fno_cache
+        run: python run_nightly.py
