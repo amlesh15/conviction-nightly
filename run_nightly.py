@@ -32,12 +32,12 @@ def _vol_mult3(md, days=3, win=20):
     recs = []
     for sym, g in md.sort_values(["symbol", "date"]).groupby("symbol"):
         vol = pd.to_numeric(g["volume"], errors="coerce").to_numpy(float); n = len(vol)
-        if n < days: recs.append({"symbol": sym, "Vol×": ""}); continue
+        if n < days: recs.append({"symbol": sym, "Vol\u00d7": ""}); continue
         ratios = []
         for j in range(n - days, n):
             w = vol[max(0, j - win + 1):j + 1]; sma = np.nanmean(w) if len(w) else 0.0
             ratios.append(vol[j] / sma if sma > 0 else 0.0)
-        recs.append({"symbol": sym, "Vol×": round(float(max(ratios)), 1)})
+        recs.append({"symbol": sym, "Vol\u00d7": round(float(max(ratios)), 1)})
     return pd.DataFrame(recs)
 
 def _deg(dash):
@@ -48,14 +48,19 @@ def _deg(dash):
                                         if (x not in ("", None) and pd.notna(x)) else x)
     return dash
 
+LIVE_COLS = ["LTP", "Today %", "High %", "Low %", "ATM", "CE \u0394%", "CE bars", "PE \u0394%", "PE bars",
+             "Regime", "Eff%", "Exp\u00d7"]   # blank here; filled by the live / ATM jobs during market hours
+
 def _order(dash):
+    for c in LIVE_COLS:
+        if c not in dash.columns: dash[c] = ""
     strip = [c for c in dash.columns if re.fullmatch(r"\d{2}-\d{2}", str(c))]
     vw    = [c for c in ("vwap3 slp", "vwap5 slp") if c in dash.columns]
     sup   = sorted([c for c in dash.columns if re.fullmatch(r"imb_sup\d+", c)], key=lambda x: int(x[7:]))
     res   = sorted([c for c in dash.columns if re.fullmatch(r"imb_res\d+", c)], key=lambda x: int(x[7:]))
-    mid   = [c for c in ("in_imb", "Vol×", "S/R Flag") if c in dash.columns]
+    mid   = [c for c in ("in_imb", "Vol\u00d7", "S/R Flag") if c in dash.columns]
     tail  = [c for c in ("Signal (latest)", "Drivers (latest)", "Patterns (latest)") if c in dash.columns]
-    return dash[["symbol"] + strip + vw + sup + res + mid + tail]
+    return dash[["symbol"] + strip + LIVE_COLS + vw + sup + res + mid + tail]
 
 def build_tables(G, md):
     feat = G["build_features"](md)
@@ -110,12 +115,44 @@ def _flag_oversold(sh, ws, df, strip_only):
         "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"=AND({tl}>-60,{tl}<=-40)"}]},
                         "format": {"backgroundColor": {"red": 1.0, "green": .75, "blue": 0.0}, "textFormat": {"bold": True}}}}}}]})
 
+def _heat_atm(sh, ws, df):
+    """CE/PE delta% green(+)/red(-) gradient; CE/PE bars green/red by that side's sign; S/R Flag colours."""
+    wid = ws.id; cols = list(df.columns); reqs = []
+    def grad(c0, lo, hi): return {"addConditionalFormatRule": {"index": 0, "rule": {
+        "ranges": [{"sheetId": wid, "startRowIndex": 1, "startColumnIndex": c0, "endColumnIndex": c0 + 1}],
+        "gradientRule": {"minpoint": {"color": {"red": .80, "green": .15, "blue": .15}, "type": "NUMBER", "value": str(lo)},
+                         "midpoint": {"color": {"red": 1, "green": 1, "blue": 1}, "type": "NUMBER", "value": "0"},
+                         "maxpoint": {"color": {"red": .13, "green": .55, "blue": .27}, "type": "NUMBER", "value": str(hi)}}}}}
+    def solid(c0, formula, rgb): return {"addConditionalFormatRule": {"index": 0, "rule": {
+        "ranges": [{"sheetId": wid, "startRowIndex": 1, "startColumnIndex": c0, "endColumnIndex": c0 + 1}],
+        "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                        "format": {"backgroundColor": {"red": rgb[0], "green": rgb[1], "blue": rgb[2]}}}}}}
+    for nm in ("CE \u0394%", "PE \u0394%"):
+        if nm in cols: reqs.append(grad(cols.index(nm), -10, 10))
+    for barcol, pctcol in (("CE bars", "CE \u0394%"), ("PE bars", "PE \u0394%")):
+        if barcol in cols and pctcol in cols:
+            bi = cols.index(barcol); pcol = re.match(r"[A-Z]+", gspread.utils.rowcol_to_a1(2, cols.index(pctcol) + 1)).group(0)
+            reqs.append(solid(bi, f"=${pcol}2>0", (0.72, 0.88, 0.70))); reqs.append(solid(bi, f"=${pcol}2<0", (0.96, 0.80, 0.80)))
+    if "S/R Flag" in cols:
+        fi = cols.index("S/R Flag")
+        def txt(word, rgb): return {"addConditionalFormatRule": {"index": 0, "rule": {
+            "ranges": [{"sheetId": wid, "startRowIndex": 1, "startColumnIndex": fi, "endColumnIndex": fi + 1}],
+            "booleanRule": {"condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": word}]},
+                            "format": {"backgroundColor": {"red": rgb[0], "green": rgb[1], "blue": rgb[2]}}}}}}
+        reqs += [txt("Bounced", (0.72, 0.88, 0.70)), txt("Rejected", (0.96, 0.80, 0.80)), txt("Broke", (0.99, 0.90, 0.60))]
+    if reqs: sh.batch_update({"requests": reqs})
+
 def publish(dash, hist, latest, today):
     sh = open_sheet()
     ws = _write(sh, "Rule Dashboard", dash)
-    strip = [i for i, c in enumerate(dash.columns) if re.fullmatch(r"\d{2}-\d{2}", str(c))]
-    if strip: _heat(sh, ws, [(min(strip), max(strip) + 1, -50, 50)])
+    cols = list(dash.columns); specs = []
+    strip = [i for i, c in enumerate(cols) if re.fullmatch(r"\d{2}-\d{2}", str(c))]
+    if strip: specs.append((min(strip), max(strip) + 1, -50, 50))
+    for nm in ("Today %", "High %", "Low %"):
+        if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -5, 5))
+    if specs: _heat(sh, ws, specs)                      # clears old rules first
     _flag_oversold(sh, ws, dash, strip_only=True)
+    _heat_atm(sh, ws, dash)
     wh = _write(sh, "Rule History", hist)
     _heat(sh, wh, [(1, len(hist.columns), -50, 50)]); _flag_oversold(sh, wh, hist, strip_only=False)
     now = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%Y-%m-%d %H:%M")
