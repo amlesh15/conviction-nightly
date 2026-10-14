@@ -1,9 +1,6 @@
 name: market-day
 
 on:
-  schedule:
-    - cron: "50 4-9 * * 1-5"            # ATM EMA hourly at :20 IST (10:20 ... 15:20)
-    - cron: "30 11 * * 1-5"             # 1-min archive at 17:00 IST
   workflow_dispatch:
     inputs:
       task:
@@ -17,7 +14,7 @@ on:
         default: false
 
 concurrency:
-  group: market-${{ github.event.schedule || inputs.task }}
+  group: market-${{ inputs.task }}
   cancel-in-progress: false
 
 permissions:
@@ -38,12 +35,7 @@ jobs:
       FORCE: ${{ inputs.force }}
     steps:
       - name: Decide task
-        run: |
-          case "${{ github.event.schedule }}" in
-            "50 4-9 * * 1-5")          echo "TASK=atm" >> $GITHUB_ENV ;;
-            "30 11 * * 1-5")           echo "TASK=archive" >> $GITHUB_ENV ;;
-            *)                         echo "TASK=${{ inputs.task }}" >> $GITHUB_ENV ;;
-          esac
+        run: echo "TASK=${{ inputs.task }}" >> $GITHUB_ENV
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
