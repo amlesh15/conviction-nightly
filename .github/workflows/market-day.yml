@@ -2,7 +2,7 @@ name: market-day
 
 on:
   schedule:
-    - cron: "7,22,37,52 3-10 * * 1-5"   # live refresh every 15 min (UTC; = 08:37-16:22 IST, gated to market hours)
+    - cron: "2-57/5 3-10 * * 1-5"   # live refresh every 5 min (UTC; = 08:32-16:27 IST, gated to market hours)
     - cron: "50 4-9 * * 1-5"            # ATM EMA hourly at :20 IST (10:20 ... 15:20)
     - cron: "30 11 * * 1-5"             # 1-min archive at 17:00 IST
   workflow_dispatch:
@@ -41,7 +41,7 @@ jobs:
       - name: Decide task
         run: |
           case "${{ github.event.schedule }}" in
-            "7,22,37,52 3-10 * * 1-5") echo "TASK=live" >> $GITHUB_ENV ;;
+            "2-57/5 3-10 * * 1-5")     echo "TASK=live" >> $GITHUB_ENV ;;
             "50 4-9 * * 1-5")          echo "TASK=atm" >> $GITHUB_ENV ;;
             "30 11 * * 1-5")           echo "TASK=archive" >> $GITHUB_ENV ;;
             *)                         echo "TASK=${{ inputs.task }}" >> $GITHUB_ENV ;;
