@@ -6,7 +6,7 @@ on:
       task:
         description: "What to run"
         type: choice
-        options: [live, atm, archive]
+        options: [live, atm, archive, trigger]
         default: live
       force:
         description: "Ignore market-hours check (for testing)"
@@ -61,6 +61,11 @@ jobs:
           else
             python live_fvg.py once
           fi
+
+      - name: Trigger engine (order-flow proxy -> ATM option alerts + log)
+        if: steps.pre.outputs.go == 'true' && (env.TASK == 'live' || env.TASK == 'trigger')
+        continue-on-error: true
+        run: python trigger_engine.py
 
       - name: ATM strike + CE/PE EMA state
         if: steps.pre.outputs.go == 'true' && env.TASK == 'atm'
