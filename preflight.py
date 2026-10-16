@@ -16,7 +16,7 @@ def out(go, why=""):
 now = dt.datetime.now(IST); t = now.hour * 60 + now.minute
 if not force:
     if now.weekday() >= 5: out(False, "weekend")
-    if mode in ("live", "atm") and not (9 * 60 + 15 <= t <= 15 * 60 + 40): out(False, f"outside market hours {now:%H:%M}")
+    if mode in ("live", "atm", "trigger") and not (9 * 60 + 15 <= t <= 15 * 60 + 40): out(False, f"outside market hours {now:%H:%M}")
     if mode == "archive" and t < 15 * 60 + 45: out(False, "market not closed yet")
 
 ok = False
