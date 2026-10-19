@@ -30,10 +30,11 @@ DAYS = int(os.environ.get("BT_DAYS", "45"))         # calendar days of 1-min his
 HZ = (15, 30, 60)
 HZ_COLS = ["r15", "r30", "r60", "rEOD"]
 
-VARIANTS = {   # name: (use daily-score gate, use VWAP confirm)
-    "ENGINE (as live)":      (True,  True),
-    "no score gate":         (False, True),
-    "no VWAP confirm":       (True,  False),
+VARIANTS = {   # name: (use daily-score gate, use VWAP confirm, only strong daily alignment)
+    "ENGINE (as live)":      (True,  True,  False),
+    "no score gate":         (False, True,  False),
+    "no VWAP confirm":       (True,  False, False),
+    "strong-aligned only":   (True,  True,  True),   # CALL needs score>=30, PUT needs score<=-30
 }
 
 # ───────────────────────────── 1. scan every stock at every simulated run time ─────────────────────────────
@@ -75,7 +76,7 @@ def build_grid(bars):
 # ───────────────────────────── 2. daily rule score history (previous close, leak-free) ─────────────────────────────
 def score_history(vals, sessions):
     hdr = [h.strip() for h in vals[0]]; sym_i = hdr.index("symbol") if "symbol" in hdr else 0
-    by_ddmm = {s.strftime("%d-%m"): s for s in sessions}
+    by_ddmm = {s.strftime("%m-%d"): s for s in sessions}   # sheet headers are MM-DD
     cols = [(i, by_ddmm[h]) for i, h in enumerate(hdr) if re.fullmatch(r"\d{2}-\d{2}", h) and h in by_ddmm]
     hist = {}
     for row in vals[1:]:
@@ -101,7 +102,7 @@ def signal_vec(G, use_vwap):
     put = rel & (G["imb"] <= -CFG["IMB_MIN"]) & (G["ret"] <= -CFG["RET_MIN"]) & dn_ok
     return np.where(call, "CALL", np.where(put, "PUT", ""))
 
-def select_triggers(G, use_score, use_vwap):
+def select_triggers(G, use_score, use_vwap, strong=False):
     side = signal_vec(G, use_vwap)
     X = G.assign(side=side)
     X = X[X["side"] != ""]
@@ -109,6 +110,9 @@ def select_triggers(G, use_score, use_vwap):
         sc = X["score"]
         bad = ((X["side"] == "CALL") & (sc < CFG["CALL_MIN_SCORE"])) | ((X["side"] == "PUT") & (sc > CFG["PUT_MAX_SCORE"]))
         X = X[~bad.fillna(False)]
+        if strong:
+            sc = X["score"]
+            X = X[((X["side"] == "CALL") & (sc >= 30)) | ((X["side"] == "PUT") & (sc <= -30))]
     X = X.assign(strength=X["imb"].abs() * X["rel_vol"]).sort_values(["session", "m", "strength"], ascending=[True, True, False])
     out = []; last = {}; cnt = {}
     for (s, m), g in X.groupby(["session", "m"], sort=True):
@@ -169,8 +173,8 @@ def run_backtest(bars, score_hist):
     assert list(vec) == live, "vectorised signal differs from trigger_engine.flow_signal"
     print("signal check OK (matches live engine)")
     summ = []; trig_all = []
-    for name, (use_score, use_vwap) in VARIANTS.items():
-        T = select_triggers(G, use_score, use_vwap)
+    for name, (use_score, use_vwap, strong) in VARIANTS.items():
+        T = select_triggers(G, use_score, use_vwap, strong)
         print(f"{name}: {len(T)} triggers on {T['session'].nunique() if len(T) else 0} days")
         summ.append(summarise(T, name, sessions))
         if name.startswith("ENGINE") and len(T):
@@ -212,12 +216,14 @@ def main():
     sh = LR.open_sheet(); vals = sh.worksheet("Rule Dashboard").get_all_values()
     hdr = [h.strip() for h in vals[0]]; si = hdr.index("symbol") if "symbol" in hdr else 0
     symbols = sorted({r[si].strip().upper() for r in vals[1:] if len(r) > si and r[si].strip()})
+    hist_vals = sh.worksheet("Rule History").get_all_values()      # full daily-score history (the dashboard shows only 5 days)
     print(f"{len(symbols)} symbols; fetching up to {DAYS} days of 1-min bars ...")
     bars = load_bars(symbols)
     if not bars: print("No bars fetched (cookie expired?)"); sys.exit(1)
     sess = sorted({x for d in bars.values() for x in d["session"].unique()})
     print(f"bars for {len(bars)} stocks | {len(sess)} sessions {sess[0]} .. {sess[-1]}")
-    S, T = run_backtest(bars, score_history(vals, sess))
+    S, T = run_backtest(bars, score_history(hist_vals, sess))
+    print(f"score history loaded for {len(score_history(hist_vals, sess))} symbols")
     if S is None: sys.exit(1)
     pd.set_option("display.width", 220); pd.set_option("display.max_columns", 20)
     print(S[(S.side == "BOTH")].round(3).to_string(index=False))
