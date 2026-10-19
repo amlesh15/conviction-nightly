@@ -142,8 +142,120 @@ def _heat_atm(sh, ws, df):
         reqs += [txt("Bounced", (0.72, 0.88, 0.70)), txt("Rejected", (0.96, 0.80, 0.80)), txt("Broke", (0.99, 0.90, 0.60))]
     if reqs: sh.batch_update({"requests": reqs})
 
+def _numfmt(sh, ws, df):
+    """Force decimals on the live columns (a sheet column can otherwise display whole numbers)."""
+    cols = list(df.columns); pats = {"LTP": "0.00", "Today %": "0.00", "High %": "0.00", "Low %": "0.00",
+                                     "CE \u0394%": "0.0", "PE \u0394%": "0.0"}
+    reqs = [{"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1,
+                                      "startColumnIndex": cols.index(nm), "endColumnIndex": cols.index(nm) + 1},
+                            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pat}}},
+                            "fields": "userEnteredFormat.numberFormat"}}
+            for nm, pat in pats.items() if nm in cols]
+    if reqs: sh.batch_update({"requests": reqs})
+
+
+# ── "which stocks' imbalance levels changed since the last nightly run" ──────────────────────────
+# Pure comparison of last night's imb_sup1..3 / imb_res1..3 with tonight's. It does NOT change how levels are computed.
+LV_S = ["imb_sup1", "imb_sup2", "imb_sup3"]; LV_R = ["imb_res1", "imb_res2", "imb_res3"]
+SNAP_HDR = ["symbol", "curr_asof", "cs1", "cs2", "cs3", "cr1", "cr2", "cr3", "prev_asof", "ps1", "ps2", "ps3", "pr1", "pr2", "pr3"]
+
+def _f(x):
+    try:
+        if x in ("", None) or (not isinstance(x, str) and pd.isna(x)): return None
+        return round(float(str(x).replace(",", "")), 1)
+    except Exception: return None
+
+def _lv(row): return tuple(_f(row.get(c)) for c in LV_S), tuple(_f(row.get(c)) for c in LV_R)
+
+def _fmt(t): return " / ".join("-" if v is None else f"{v:g}" for v in t)
+
+def _diff(old, new, tag):
+    add = [v for v in new if v is not None and v not in old]; gone = [v for v in old if v is not None and v not in new]
+    return f"{tag}: " + " ".join([f"+{v:g}" for v in add] + [f"\u2212{v:g}" for v in gone])
+
+def compute_changes(dash, snap, latest):
+    """snap = {symbol: {c_asof, c, p_asof, p}} (levels as saved by earlier runs). Returns (flags, details, change_rows, new_snap)."""
+    flags, details, rows, new_snap = [], [], [], {}
+    for _, r in dash.iterrows():
+        sym = r["symbol"]; sn, rn = _lv(r); old = snap.get(sym)
+        if old is None: prev, prev_asof, cur_prev = None, "", None
+        elif old["c_asof"] == latest: prev, prev_asof = (old["p"], old["p_asof"]) if old["p_asof"] else (None, "")   # same-day re-run
+        else: prev, prev_asof = old["c"], old["c_asof"]
+        new_snap[sym] = {"c_asof": latest, "c": (sn, rn), "p_asof": prev_asof, "p": prev if prev else ((None,) * 3, (None,) * 3)}
+        flag = det = ""
+        if prev:
+            sc, rc = sn != prev[0], rn != prev[1]
+            if sc or rc:
+                flag = "S+R changed" if (sc and rc) else ("Support changed" if sc else "Resistance changed")
+                det = " | ".join(x for x in ((_diff(prev[0], sn, "S") if sc else ""), (_diff(prev[1], rn, "R") if rc else "")) if x)
+                rows.append({"symbol": sym, "change": flag, "was (date)": prev_asof, "support was": _fmt(prev[0]), "support now": _fmt(sn),
+                             "resistance was": _fmt(prev[1]), "resistance now": _fmt(rn), "detail": det})
+        flags.append(flag); details.append(det)
+    return flags, details, rows, new_snap
+
+def _snap_rows(new_snap):
+    out = []
+    for sym, d in new_snap.items():
+        c, p = d["c"], d["p"]
+        out.append([sym, d["c_asof"], *c[0], *c[1], d["p_asof"], *p[0], *p[1]])
+    return pd.DataFrame(out, columns=SNAP_HDR)
+
+def _snap_read(sh):
+    try: vals = sh.worksheet("Levels Snapshot").get_all_values()
+    except gspread.WorksheetNotFound: vals = []
+    snap = {}
+    for r in vals[1:]:
+        r = r + [""] * (15 - len(r))
+        snap[r[0]] = {"c_asof": r[1], "c": (tuple(_f(x) for x in r[2:5]), tuple(_f(x) for x in r[5:8])), "p_asof": r[8],
+                      "p": (tuple(_f(x) for x in r[9:12]), tuple(_f(x) for x in r[12:15]))}
+    if snap: return snap
+    # first ever run: use the levels currently on the dashboard as "last night"
+    try:
+        v = sh.worksheet("Rule Dashboard").get_all_values(); hdr = [h.strip() for h in v[0]]; ix = {h: i for i, h in enumerate(hdr)}
+        asof = ""
+        try: asof = {r[0]: r[1] for r in sh.worksheet("Run Info").get_all_values()[1:]}.get("Latest data date", "")
+        except Exception: pass
+        for r in v[1:]:
+            if not r or not r[0].strip(): continue
+            g = lambda c: r[ix[c]] if c in ix and ix[c] < len(r) else ""
+            snap[r[0].strip()] = {"c_asof": asof, "c": (tuple(_f(g(c)) for c in LV_S), tuple(_f(g(c)) for c in LV_R)), "p_asof": "", "p": ((None,) * 3, (None,) * 3)}
+    except Exception as e: print("levels baseline unavailable:", e)
+    return snap
+
+def annotate_levels(sh, dash, latest):
+    snap = _snap_read(sh)
+    flags, details, rows, new_snap = compute_changes(dash, snap, str(latest))
+    dash = dash.copy(); dash["Levels \u0394"] = flags; dash["Levels \u0394 detail"] = details
+    cols = ["symbol", "change", "was (date)", "support was", "support now", "resistance was", "resistance now", "detail"]
+    ch = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame([["(no level changes since last run)"] + [""] * 7], columns=cols)
+    wc = _write(sh, "Levels Changes", ch)
+    try: wc.freeze(rows=1)
+    except Exception: pass
+    _write(sh, "Levels Snapshot", _snap_rows(new_snap))
+    n = len(rows); print(f"levels changed for {n} of {len(dash)} stocks")
+    if n:
+        try:
+            import notify
+            if notify.enabled():
+                names = ", ".join(r["symbol"] for r in rows[:60]) + (" ..." if n > 60 else "")
+                notify.send(f"\U0001F4D0 Imbalance levels changed for {n} stocks \u2014 redraw: {names}\n(details in the 'Levels Changes' tab)")
+        except Exception as e: print("telegram failed:", e)
+    return dash
+
+def _flag_levels(sh, ws, dash):
+    """Amber fill on non-empty 'Levels \u0394' cells."""
+    cols = list(dash.columns)
+    if "Levels \u0394" not in cols: return
+    i = cols.index("Levels \u0394"); L = gspread.utils.rowcol_to_a1(1, i + 1)[:-1]
+    sh.batch_update({"requests": [{"addConditionalFormatRule": {"index": 0, "rule": {
+        "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(dash) + 1, "startColumnIndex": i, "endColumnIndex": i + 2}],
+        "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"=LEN(${L}2)>0"}]},
+                        "format": {"backgroundColor": {"red": 1.0, "green": 0.9, "blue": 0.6}}}}}}]})
+
 def publish(dash, hist, latest, today):
     sh = open_sheet()
+    try: dash = annotate_levels(sh, dash, latest)
+    except Exception as e: print("levels-changed step failed (dashboard still updated):", e)
     ws = _write(sh, "Rule Dashboard", dash)
     cols = list(dash.columns); specs = []
     strip = [i for i, c in enumerate(cols) if re.fullmatch(r"\d{2}-\d{2}", str(c))]
@@ -153,6 +265,9 @@ def publish(dash, hist, latest, today):
     if specs: _heat(sh, ws, specs)                      # clears old rules first
     _flag_oversold(sh, ws, dash, strip_only=True)
     _heat_atm(sh, ws, dash)
+    _numfmt(sh, ws, dash)
+    try: _flag_levels(sh, ws, dash)
+    except Exception as e: print("level highlight skipped:", e)
     wh = _write(sh, "Rule History", hist)
     _heat(sh, wh, [(1, len(hist.columns), -50, 50)]); _flag_oversold(sh, wh, hist, strip_only=False)
     now = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%Y-%m-%d %H:%M")
