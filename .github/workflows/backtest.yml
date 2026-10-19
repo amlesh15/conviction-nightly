@@ -1,0 +1,34 @@
+name: backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      STATE_DIR: ${{ github.workspace }}/state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python setup_env.py
+      - name: Trigger backtest
+        run: python backtest_triggers.py
+      - name: Keep the result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: out/
+          if-no-files-found: ignore
