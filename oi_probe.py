@@ -173,36 +173,90 @@ def stage_auth():
     add("1 auth", "cash 1-min candles (RELIANCE)", df is not None, f"status={info['status']} {info['err'] or ''} rows={0 if df is None else len(df)}")
     return df is not None
 
-def _try_metacache():
-    """GET answered 405 last time, so try the other methods too. Returns (response, label) for the first 200."""
-    tries = [("GET", None), ("POST", {}), ("POST", None), ("GET", "slash")]
-    for method, body in tries:
-        url = META_CACHE + ("/" if body == "slash" else "")
-        r, err = http(method, url, None if body == "slash" else body, tries=2)
-        label = f"{method}{' (empty json body)' if body == {} else ''}{' trailing /' if body == 'slash' else ''}"
-        if r is None: add("2 metacache", f"{label}", False, err); continue
-        allow = r.headers.get("allow", "") or r.headers.get("access-control-allow-methods", "")
-        add("2 metacache", f"{label}", r.status_code == 200, f"HTTP {r.status_code} {len(r.content)} bytes allow='{allow}' {r.text[:160]}".replace("\n", " "))
-        if r.status_code == 200: return r, label
-    o, _ = http("OPTIONS", META_CACHE, None, tries=1)
-    if o is not None: add("2 metacache", "OPTIONS", None, f"HTTP {o.status_code} allow='{o.headers.get('allow','')}' cors='{o.headers.get('access-control-allow-methods','')}'")
+DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+def _post_meta(body):
+    r, err = http("POST", META_CACHE, body, tries=2)
+    if r is None: return None, err
+    return r, None
+
+def _discover_body(underlyers):
+    """POST needs a body. The server names missing fields in its error, so build the body step by step."""
+    body = {"underlyer_list": list(underlyers)}
+    for _ in range(6):
+        r, err = _post_meta(body)
+        if r is None: add("2 metacache", f"POST {list(body)}", False, err); return None, None
+        msg = r.text[:200].replace("\n", " ")
+        add("2 metacache", f"POST body keys={list(body)}", r.status_code == 200, f"HTTP {r.status_code} {len(r.content)} bytes {msg if r.status_code != 200 else ''}")
+        if r.status_code == 200: return body, r
+        m = re.search(r"missing field `(\w+)`", r.text)
+        if not m: return None, r
+        f = m.group(1)
+        body[f] = [] if re.search(r"list|ids|symbols|expiries", f) else (False if re.search(r"^(is|include|with)_", f) else "")
+        add("2 metacache", f"added field {f}", None, f"guessing {json.dumps(body[f])}")
     return None, None
 
-def stage_metacache():
-    r, label = _try_metacache()
-    if r is None: return None, {}
-    ct = r.headers.get("content-type", ""); size = len(r.content)
+def structured_chains(js, universe):
+    """Fallback if the metacache does not contain ready-made option symbols: rebuild them from expiry dates + strike lists."""
+    out = {}
+    def nums(o, acc, depth=0):
+        if isinstance(o, list):
+            v = [x for x in o if isinstance(x, (int, float)) and not isinstance(x, bool)]
+            if len(v) >= 5 and len(v) >= 0.8 * len(o): acc.append(sorted(set(float(x) for x in v)))
+            for x in o[:200]: nums(x, acc, depth + 1)
+        elif isinstance(o, dict):
+            for x in o.values(): nums(x, acc, depth + 1)
+    def dates(o, acc):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(k, str) and DATE_RE.match(k): acc.add(k[:10])
+                dates(v, acc)
+        elif isinstance(o, list):
+            for x in o[:500]: dates(x, acc)
+        elif isinstance(o, str) and DATE_RE.match(o): acc.add(o[:10])
+    stack = [js]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in universe and k not in out:
+                    ds = set(); dates(v, ds); ns = []; nums(v, ns)
+                    strikes = sorted(set().union(*ns)) if ns else []
+                    ch = {}
+                    for d in ds:
+                        yy, mm = int(d[2:4]), int(d[5:7]) - 1
+                        ch[(yy, mm)] = {"CE": {k2: f"{k}{yy:02d}{MONTHS[mm]}{k2:g}CE" for k2 in strikes}, "PE": {k2: f"{k}{yy:02d}{MONTHS[mm]}{k2:g}PE" for k2 in strikes}}
+                    if ch: out[k] = ch
+                stack.append(v)
+        elif isinstance(o, list): stack.extend(o[:3000])
+    return out
+
+def stage_metacache(universe):
+    """-> (js_sample, recs, structured_chains|None)"""
+    names = sorted(set(universe) | {CASE})
+    body, r = _discover_body([CASE])
+    if body is None: return None, {}, None
     try: js = r.json()
-    except Exception: add("2 metacache", "response is JSON", False, f"{ct} {r.text[:200]}"); return None, {}
-    with open(f"{OUT}/metacache.json", "w") as f: json.dump(js, f)
-    add("2 metacache", "downloaded", True, f"via {label}: {size/1e6:.1f} MB, {ct}")
+    except Exception: add("2 metacache", "response is JSON", False, r.text[:200]); return None, {}, None
+    json.dump(js, open(f"{OUT}/metacache_{CASE}.json", "w"))
     recs = harvest(js)
-    und = {parse_sym(s)[0] for s in recs}
-    exps = sorted({(parse_sym(s)[1], parse_sym(s)[2]) for s in recs})
-    add("2 metacache", "option contracts found", len(recs) > 0, f"{len(recs):,} option symbols | {len(und)} underlyings | expiries: {', '.join(exp_label(e) for e in exps[:8])}")
-    case = [s for s in recs if parse_sym(s)[0] == CASE]
-    add("2 metacache", f"{CASE} contracts", len(case) > 0, f"{len(case)} contracts; sample record: {json.dumps(recs.get(case[0]) if case else None, default=str)[:300]}")
-    return js, recs
+    add("2 metacache", f"{CASE} only: option symbols in response", len(recs) > 0, f"{len(recs)} symbols; response {len(r.content)/1e3:.0f} KB")
+    # whole universe, in batches
+    allrecs = dict(recs); sc = {}; t0 = time.time(); bad = 0
+    for i in range(0, len(names), 40):
+        b = dict(body); b["underlyer_list"] = names[i:i + 40]
+        rr, err = _post_meta(b)
+        if rr is None or rr.status_code != 200: bad += 1; continue
+        try: j = rr.json()
+        except Exception: bad += 1; continue
+        allrecs.update(harvest(j))
+        if not recs: sc.update(structured_chains(j, set(names)))
+    und = {parse_sym(x)[0] for x in allrecs}
+    exps = sorted({(parse_sym(x)[1], parse_sym(x)[2]) for x in allrecs})
+    add("2 metacache", "whole universe downloaded", bad == 0, f"{len(names)} underlyers in {time.time()-t0:.0f}s, {bad} failed batches | {len(allrecs):,} symbols found | {len(und)} underlyers | expiries {', '.join(exp_label(e) for e in exps[:6])}")
+    if not allrecs and sc: add("2 metacache", "symbols rebuilt from structure (fallback)", True, f"{len(sc)} underlyers; sample {next(iter(sc))}: expiries {[exp_label(e) for e in list(sc[next(iter(sc))])[:4]]}")
+    if not allrecs and not sc: add("2 metacache", "could not find strikes in response", False, "see 'OI Probe Schema' tab — need to write a parser for this layout")
+    return js, allrecs, (sc or None)
 
 def stage_metadata(recs):
     r, err = http("GET", META)
@@ -358,12 +412,12 @@ def universe_from_sheet():
 def run(universe):
     if not stage_auth():
         add("1 auth", "STOP", False, "cookie rejected or Sensibull unreachable — refresh SENSIBULL_COOKIE secret"); return None, None, None, []
-    js, recs = stage_metacache()
+    js, recs, sc = stage_metacache(universe)
     schema = (outline(js) if js is not None else [])
     stage_metadata(recs)
     schema = META_SCHEMA + schema
     stage_case_contract()
-    chains = build_chains(recs, set(universe) | {CASE}) if recs else {}
+    chains = build_chains(recs, set(universe) | {CASE}) if recs else (sc or {})
     T = stage_case_chain(chains) if chains else None
     U = stage_universe(chains, universe) if chains else None
     if chains: stage_history(chains)
@@ -393,8 +447,12 @@ def _fake_universe():
 def _fake_transport(method, url, body=None):
     U = _fake_universe()
     if url.endswith("instrument_metacache_addon/1"):
+        if method != "POST": return _R(405, text="")
+        if body is None: return _R(400, text="Failed to parse the request body as JSON: EOF")
+        if "underlyer_list" not in body: return _R(422, text="Failed to deserialize: missing field `underlyer_list` at line 1 column 2")
         data = {}
         for u, sp in U.items():
+            if u not in body["underlyer_list"]: continue
             step = 5 if sp < 1000 else 50
             for e in ("26OCT", "26NOV"):
                 for k in range(int(sp * .8 // step * step), int(sp * 1.2), step):
