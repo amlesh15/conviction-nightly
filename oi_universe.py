@@ -273,7 +273,7 @@ NOTES = [["term", "meaning"],
 def main(selftest=False):
     universe = ([] if selftest else P.universe_from_sheet())
     if selftest: universe = sorted(_fake_universe())
-    lim = int(os.environ.get("OI_UNIVERSE_LIMIT", "0")); universe = universe[:lim] if lim else universe
+    lim = int(os.environ.get("OI_UNIVERSE_LIMIT") or 0); universe = universe[:lim] if lim else universe
     chains, lots = load_meta(universe); names = [u for u in sorted(set(universe) | {CASE}) if u in chains]
     print(f"{len(names)} stocks with contracts; fetching history ...", flush=True)
     parts, metas, fails = [], [], []; t0 = time.time()
