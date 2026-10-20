@@ -44,7 +44,7 @@ jobs:
         if: always()
         run: |
           set +e
-          [ -d out/oi/archive ] || exit 0
+          [ -n "$(ls -A out/oi/archive 2>/dev/null)" ] || { echo "nothing to archive"; exit 0; }
           git config --global user.name archive-bot
           git config --global user.email archive-bot@users.noreply.github.com
           rm -rf /tmp/arch
