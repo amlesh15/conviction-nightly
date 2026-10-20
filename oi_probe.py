@@ -35,6 +35,7 @@ DEADLINE = time.time() + BUDGET_MIN * 60
 def out_of_time(): return time.time() > DEADLINE
 
 STATS = {"calls": 0, "lat": [], "codes": Counter(), "errors": Counter()}
+META_SCHEMA = []
 REPORT = []          # [stage, check, result, detail]
 
 def add(stage, check, ok, detail=""):
@@ -96,7 +97,11 @@ def profile(df):
     s = df["session"].max(); d = df[df["session"] == s]
     out = {"sessions": int(df["session"].nunique()), "latest": str(s), "rows": len(d), "first": d["ts"].iloc[0].strftime("%H:%M"),
            "last": d["ts"].iloc[-1].strftime("%H:%M"), "close": float(d["close"].iloc[-1]) if "close" in d else None,
-           "volume": float(d["volume"].fillna(0).sum()) if "volume" in d else None, "has_oi": "oi" in d.columns}
+           "has_oi": "oi" in d.columns}
+    if "volume" in d:
+        v = d["volume"].fillna(0).to_numpy(float)
+        cum = len(v) > 30 and (np.diff(v) >= 0).mean() > 0.98 and v[-1] > v[0] * 3          # rising every minute => running total
+        out["volume_is_cumulative"] = bool(cum); out["volume"] = float(v[-1]) if cum else float(v.sum())
     if "oi" in d.columns:
         o = d["oi"]; out["oi_nonnull%"] = round(o.notna().mean() * 100, 1)
         oo = o.dropna()
@@ -168,15 +173,29 @@ def stage_auth():
     add("1 auth", "cash 1-min candles (RELIANCE)", df is not None, f"status={info['status']} {info['err'] or ''} rows={0 if df is None else len(df)}")
     return df is not None
 
+def _try_metacache():
+    """GET answered 405 last time, so try the other methods too. Returns (response, label) for the first 200."""
+    tries = [("GET", None), ("POST", {}), ("POST", None), ("GET", "slash")]
+    for method, body in tries:
+        url = META_CACHE + ("/" if body == "slash" else "")
+        r, err = http(method, url, None if body == "slash" else body, tries=2)
+        label = f"{method}{' (empty json body)' if body == {} else ''}{' trailing /' if body == 'slash' else ''}"
+        if r is None: add("2 metacache", f"{label}", False, err); continue
+        allow = r.headers.get("allow", "") or r.headers.get("access-control-allow-methods", "")
+        add("2 metacache", f"{label}", r.status_code == 200, f"HTTP {r.status_code} {len(r.content)} bytes allow='{allow}' {r.text[:160]}".replace("\n", " "))
+        if r.status_code == 200: return r, label
+    o, _ = http("OPTIONS", META_CACHE, None, tries=1)
+    if o is not None: add("2 metacache", "OPTIONS", None, f"HTTP {o.status_code} allow='{o.headers.get('allow','')}' cors='{o.headers.get('access-control-allow-methods','')}'")
+    return None, None
+
 def stage_metacache():
-    r, err = http("GET", META_CACHE)
-    if r is None: add("2 metacache", "GET instrument_metacache_addon", False, err); return None, {}
+    r, label = _try_metacache()
+    if r is None: return None, {}
     ct = r.headers.get("content-type", ""); size = len(r.content)
-    if r.status_code != 200: add("2 metacache", "GET instrument_metacache_addon", False, f"HTTP {r.status_code} {r.text[:200]}"); return None, {}
     try: js = r.json()
     except Exception: add("2 metacache", "response is JSON", False, f"{ct} {r.text[:200]}"); return None, {}
     with open(f"{OUT}/metacache.json", "w") as f: json.dump(js, f)
-    add("2 metacache", "GET instrument_metacache_addon", True, f"HTTP 200, {size/1e6:.1f} MB, {ct}")
+    add("2 metacache", "downloaded", True, f"via {label}: {size/1e6:.1f} MB, {ct}")
     recs = harvest(js)
     und = {parse_sym(s)[0] for s in recs}
     exps = sorted({(parse_sym(s)[1], parse_sym(s)[2]) for s in recs})
@@ -202,6 +221,12 @@ def stage_metadata(recs):
         r2, e2 = http("GET", META + suf)
         add("3 metadata", f"GET instrument_metadata/{suf[:30]}", None if r2 is None else r2.status_code == 200,
             e2 or f"HTTP {r2.status_code}: {r2.text[:200]}".replace("\n", " "))
+        if r2 is not None and r2.status_code == 200 and suf == probe_sym:
+            try:
+                js2 = r2.json(); META_SCHEMA.extend(["--- instrument_metadata/" + probe_sym + " ---"] + outline(js2, 60))
+                pl = js2.get("payload", js2); open(f"{OUT}/contract_metadata.json", "w").write(json.dumps(js2))
+                add("3 metadata", "contract fields", None, ", ".join(f"{k}={str(v)[:24]}" for k, v in list(pl.items())[:30]))
+            except Exception as ex: add("3 metadata", "parse contract metadata", False, str(ex))
 
 def stage_case_contract():
     sym = f"{CASE}26OCT340CE"
@@ -334,8 +359,9 @@ def run(universe):
     if not stage_auth():
         add("1 auth", "STOP", False, "cookie rejected or Sensibull unreachable — refresh SENSIBULL_COOKIE secret"); return None, None, None, []
     js, recs = stage_metacache()
-    schema = outline(js) if js is not None else []
+    schema = (outline(js) if js is not None else [])
     stage_metadata(recs)
+    schema = META_SCHEMA + schema
     stage_case_contract()
     chains = build_chains(recs, set(universe) | {CASE}) if recs else {}
     T = stage_case_chain(chains) if chains else None
