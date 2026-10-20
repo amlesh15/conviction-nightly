@@ -30,6 +30,10 @@ OUT = "out/oi"; os.makedirs(OUT, exist_ok=True)
 MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 OPT_RE = re.compile(r"^([A-Z0-9&\-]+?)(\d{2})(" + "|".join(MONTHS) + r")(\d+(?:\.\d+)?)(CE|PE)$")
 
+BUDGET_MIN = float(os.environ.get("OI_BUDGET_MIN", "25"))      # hard stop: after this the probe stops calling and writes what it has
+DEADLINE = time.time() + BUDGET_MIN * 60
+def out_of_time(): return time.time() > DEADLINE
+
 STATS = {"calls": 0, "lat": [], "codes": Counter(), "errors": Counter()}
 REPORT = []          # [stage, check, result, detail]
 
@@ -45,7 +49,7 @@ def _hdr():
 
 def _real_transport(method, url, body=None):
     import requests
-    return requests.request(method, url, json=body, headers=_hdr(), timeout=40)
+    return requests.request(method, url, json=body, headers=_hdr(), timeout=(8, 20))
 
 TRANSPORT = _real_transport
 
@@ -53,6 +57,7 @@ def http(method, url, body=None, tries=3):
     """Returns (response|None, error|None). Records latency/status. Retries 429/5xx/network."""
     last = None
     for k in range(tries):
+        if out_of_time(): return None, "probe time budget used up"
         t0 = time.time()
         try:
             r = TRANSPORT(method, url, body); dtm = time.time() - t0
@@ -238,6 +243,7 @@ def stage_universe(chains, universe):
     add("6 universe", "universe stocks present in metacache", len(missing_meta) == 0, f"{len(universe)-len(missing_meta)}/{len(universe)} found; missing: {', '.join(missing_meta[:25])}")
     todo = [u for u in universe if u in chains]
     def one(u):
+        if out_of_time(): return {"symbol": u, "status": "skipped (time budget)"}
         res = {"symbol": u, "expiry": "", "strikes": "", "spot": "", "atm": "", "ce_rows": "", "pe_rows": "", "ce_oi%": "", "pe_oi%": "",
                "ce_last": "", "pe_last": "", "ce_oi_upd%": "", "pe_oi_upd%": "", "status": "", "error": ""}
         e = nearest_expiry(list(chains[u].keys())); ch = chains[u][e]; res["expiry"] = exp_label(e); res["strikes"] = len(ch["CE"])
@@ -259,7 +265,7 @@ def stage_universe(chains, universe):
     with cf.ThreadPoolExecutor(max_workers=WORKERS) as ex:
         for i, r in enumerate(ex.map(one, todo), 1):
             rows.append(r)
-            if i % 25 == 0: print(f"  universe {i}/{len(todo)}")
+            if i % 10 == 0: print(f"  universe {i}/{len(todo)}  ({time.time()-t0:.0f}s)", flush=True)
     U = pd.DataFrame(rows); U.to_csv(f"{OUT}/universe.csv", index=False)
     n_ok = int((U["status"] == "OK").sum()) if len(U) else 0
     add("6 universe", "ATM CE+PE candles for every stock", n_ok >= 0.9 * max(1, len(todo)), f"{n_ok}/{len(todo)} OK in {time.time()-t0:.0f}s")
@@ -340,8 +346,11 @@ def run(universe):
 
 def main():
     universe = universe_from_sheet()
-    print(f"{len(universe)} stocks in the conviction universe; case study: {CASE}")
-    T, U, schema, _ = run(universe)
+    print(f"{len(universe)} stocks in the conviction universe; case study: {CASE}; time budget {BUDGET_MIN:g} min", flush=True)
+    T = U = None; schema = []
+    try: T, U, schema, _ = run(universe)
+    except Exception as e: add("run", "unexpected error", False, f"{type(e).__name__}: {e}")
+    if out_of_time(): add("run", "time budget", False, f"stopped after {BUDGET_MIN:g} min — results above are partial")
     try: publish(schema, T, U)
     except Exception as e: print("sheet write failed:", e)
     json.dump(REPORT, open(f"{OUT}/report.json", "w"), indent=1)
