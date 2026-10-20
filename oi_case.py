@@ -30,6 +30,7 @@ BAND = int(os.environ.get("OI_BAND", "10"))                 # strikes each side 
 DAYS = int(os.environ.get("OI_DAYS", "40"))                 # calendar days of history (API max 60)
 OUT = P.OUT
 TRANSPORT_DAYS = None
+MIN_OI_SHARE = float(os.environ.get("OI_MIN_OI_SHARE", "0.3"))   # session counts only if band OI >= 30% of the biggest session
 
 BULL = {"CE short cover", "CE long build", "PE writing", "PE long unwind"}
 BEAR = {"CE writing", "CE long unwind", "PE short cover", "PE long build"}
@@ -149,7 +150,7 @@ def days_table(sessions, lot):
     for S in sessions:
         if len(S.strikes) < 5 or len(S.idx) < 100: continue
         _, d = window(S, "09:15", "15:30", lot)
-        rows.append({"session": str(S.s), "open": S.open_px, "close": d["spot end"], "day chg%": (d["spot end"] / S.open_px - 1) * 100,
+        rows.append({"session": str(S.s), "band OI at open (L)": d["band OI at start (L)"], "open": S.open_px, "close": d["spot end"], "day chg%": (d["spot end"] / S.open_px - 1) * 100,
                      "high vs open%": (S.hi / S.open_px - 1) * 100, "low vs open%": (S.lo / S.open_px - 1) * 100,
                      "CE dOI (L)": d["CE dOI (L sh)"], "PE dOI (L)": d["PE dOI (L sh)"], "PRESSURE (L)": d["PRESSURE (L)"],
                      "call wall": d["call wall start→end"], "put wall": d["put wall start→end"], "story": d["story"]})
@@ -157,9 +158,16 @@ def days_table(sessions, lot):
             a, b = fmt_hm(hm("09:15") + 30 * k), fmt_hm(hm("09:15") + 30 * (k + 1))
             _, w = window(S, a, b, lot)
             b0 = w["band OI at start (L)"] or np.nan
-            blocks.append({"session": str(S.s), "k": k, "ret": w["spot chg%"], "pressure": w["pressure % of band OI"],
+            blocks.append({"session": str(S.s), "band": d["band OI at start (L)"], "k": k, "ret": w["spot chg%"], "pressure": w["pressure % of band OI"],
                            "ce": w["CE dOI (L sh)"] / b0 * 100, "pe": w["PE dOI (L sh)"] / b0 * 100})
-    return pd.DataFrame(rows), pd.DataFrame(blocks)
+    D = pd.DataFrame(rows); B = pd.DataFrame(blocks)
+    # Sessions before the previous expiry only have this contract as a thin FAR-month series (tiny OI). Keep sessions whose
+    # band OI is at least MIN_OI_SHARE of the biggest session; those are the ones where this contract was the live one.
+    if len(D):
+        thr = MIN_OI_SHARE * D["band OI at open (L)"].max()
+        D["used in test"] = np.where(D["band OI at open (L)"] >= thr, "yes", "no (thin far-month OI)")
+        B = B[B["session"].isin(D.loc[D["used in test"] == "yes", "session"])].drop(columns=["band"], errors="ignore")
+    return D, B
 
 def _resid(y, z):
     A = np.column_stack([np.ones(len(z)), z]); beta = np.linalg.lstsq(A, y, rcond=None)[0]; return y - A @ beta
@@ -218,6 +226,7 @@ NOTES = [
     ["pressure % of band OI", "PRESSURE divided by total band OI at window start — comparable across days"],
     ["call wall / put wall", "strike with the largest call OI / put OI (acts as resistance / support)"],
     ["OI FED Test", "uses ALL sessions. Everything is de-meaned inside each day, then we ask: does this OI measure predict the NEXT 30-min move even after removing what the stock's own move already explains? 95% CI comes from resampling whole sessions. 'pressure' is partly circular with the same-block move (it uses the option's price, which follows the stock) — read only its NEXT-block row"],
+    ["sessions used", "OI FED Days column 'used in test': early sessions saw this contract as a thin far-month series (tiny OI), so they are left out of the cross-day test"],
     ["caveat", "we infer intent from OI + option price; option prices also move with the stock, IV and time decay. Min move to count = 2 lots"],
 ]
 
