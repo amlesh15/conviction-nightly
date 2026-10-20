@@ -111,6 +111,28 @@ def profile(df):
     return out
 
 # ───────────────────────────── schema + symbol harvest ─────────────────────────────
+def unwrap(o, depth=0):
+    """Some values are JSON stored inside a string ("{\\"a\\":1}"). Decode them, recursively."""
+    if depth > 6: return o
+    if isinstance(o, str):
+        t = o.strip()
+        if len(t) > 1 and t[0] in "{[" and t[-1] in "}]":
+            try: return unwrap(json.loads(t), depth + 1)
+            except Exception: return o
+        return o
+    if isinstance(o, dict): return {k: unwrap(v, depth + 1) for k, v in o.items()}
+    if isinstance(o, list): return [unwrap(v, depth + 1) for v in o]
+    return o
+
+def first_long_json_string(o):
+    stack = [o]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, str) and len(x) > 200 and x.strip()[:1] in "{[": return x
+        if isinstance(x, dict): stack.extend(x.values())
+        elif isinstance(x, list): stack.extend(x[:5])
+    return None
+
 def outline(obj, max_lines=160):
     """Compact description of an unknown JSON so we can write a parser: path, type, size, example."""
     lines = []
@@ -196,36 +218,54 @@ def _discover_body(underlyers):
         add("2 metacache", f"added field {f}", None, f"guessing {json.dumps(body[f])}")
     return None, None
 
+def _num_key(k):
+    try:
+        v = float(str(k).replace(",", ""))
+        return v if v > 0 and not DATE_RE.match(str(k)) else None
+    except Exception: return None
+
 def structured_chains(js, universe):
-    """Fallback if the metacache does not contain ready-made option symbols: rebuild them from expiry dates + strike lists."""
+    """Fallback if the metacache holds no ready-made option symbols: rebuild them from expiry dates + strikes.
+    An 'expiry node' is a dict entry whose key is a date (or that has an 'expiry' field); strikes = numeric lists
+    or numeric dict-keys inside it. If strikes sit outside the expiry node they are shared by all expiries."""
     out = {}
-    def nums(o, acc, depth=0):
+    def collect_strikes(o, acc, depth=0):
+        if depth > 8: return
         if isinstance(o, list):
             v = [x for x in o if isinstance(x, (int, float)) and not isinstance(x, bool)]
-            if len(v) >= 5 and len(v) >= 0.8 * len(o): acc.append(sorted(set(float(x) for x in v)))
-            for x in o[:200]: nums(x, acc, depth + 1)
+            if len(v) >= 5 and len(v) >= 0.8 * len(o): acc.update(float(x) for x in v)
+            for x in o[:400]: collect_strikes(x, acc, depth + 1)
         elif isinstance(o, dict):
-            for x in o.values(): nums(x, acc, depth + 1)
-    def dates(o, acc):
+            for k, v in o.items():
+                kk = _num_key(k)
+                if kk is not None and isinstance(v, (dict, list, int, float, str)) and kk >= 1: acc.add(kk)
+                if str(k).lower() in ("strike", "strike_price", "strikes") and isinstance(v, (int, float)): acc.add(float(v))
+                collect_strikes(v, acc, depth + 1)
+    def find_expiries(o, found, shared, depth=0):
+        if depth > 8: return
         if isinstance(o, dict):
             for k, v in o.items():
-                if isinstance(k, str) and DATE_RE.match(k): acc.add(k[:10])
-                dates(v, acc)
+                if isinstance(k, str) and DATE_RE.match(k): found[k[:10]] = v
+                else: find_expiries(v, found, shared, depth + 1)
+            e = o.get("expiry") or o.get("expiry_date")
+            if isinstance(e, str) and DATE_RE.match(e): found.setdefault(e[:10], o)
         elif isinstance(o, list):
-            for x in o[:500]: dates(x, acc)
-        elif isinstance(o, str) and DATE_RE.match(o): acc.add(o[:10])
+            for x in o[:500]: find_expiries(x, found, shared, depth + 1)
     stack = [js]
     while stack:
         o = stack.pop()
         if isinstance(o, dict):
             for k, v in o.items():
                 if k in universe and k not in out:
-                    ds = set(); dates(v, ds); ns = []; nums(v, ns)
-                    strikes = sorted(set().union(*ns)) if ns else []
+                    found = {}; find_expiries(v, found, None)
+                    shared = set(); 
+                    if not found: continue
                     ch = {}
-                    for d in ds:
+                    for d, node in found.items():
+                        st = set(); collect_strikes(node, st)
+                        if not st: collect_strikes(v, st)
                         yy, mm = int(d[2:4]), int(d[5:7]) - 1
-                        ch[(yy, mm)] = {"CE": {k2: f"{k}{yy:02d}{MONTHS[mm]}{k2:g}CE" for k2 in strikes}, "PE": {k2: f"{k}{yy:02d}{MONTHS[mm]}{k2:g}PE" for k2 in strikes}}
+                        ch[(yy, mm)] = {"CE": {x: f"{k}{yy:02d}{MONTHS[mm]}{x:g}CE" for x in sorted(st)}, "PE": {x: f"{k}{yy:02d}{MONTHS[mm]}{x:g}PE" for x in sorted(st)}}
                     if ch: out[k] = ch
                 stack.append(v)
         elif isinstance(o, list): stack.extend(o[:3000])
@@ -239,6 +279,9 @@ def stage_metacache(universe):
     try: js = r.json()
     except Exception: add("2 metacache", "response is JSON", False, r.text[:200]); return None, {}, None
     json.dump(js, open(f"{OUT}/metacache_{CASE}.json", "w"))
+    raw = first_long_json_string(js)
+    if raw: add("2 metacache", "inner JSON string (first 700 chars)", None, raw[:700])
+    js = unwrap(js)
     recs = harvest(js)
     add("2 metacache", f"{CASE} only: option symbols in response", len(recs) > 0, f"{len(recs)} symbols; response {len(r.content)/1e3:.0f} KB")
     # whole universe, in batches
@@ -247,13 +290,15 @@ def stage_metacache(universe):
         b = dict(body); b["underlyer_list"] = names[i:i + 40]
         rr, err = _post_meta(b)
         if rr is None or rr.status_code != 200: bad += 1; continue
-        try: j = rr.json()
+        try: j = unwrap(rr.json())
         except Exception: bad += 1; continue
         allrecs.update(harvest(j))
         if not recs: sc.update(structured_chains(j, set(names)))
     und = {parse_sym(x)[0] for x in allrecs}
     exps = sorted({(parse_sym(x)[1], parse_sym(x)[2]) for x in allrecs})
     add("2 metacache", "whole universe downloaded", bad == 0, f"{len(names)} underlyers in {time.time()-t0:.0f}s, {bad} failed batches | {len(allrecs):,} symbols found | {len(und)} underlyers | expiries {', '.join(exp_label(e) for e in exps[:6])}")
+    if not allrecs and not sc and js is not None:
+        sc = structured_chains(js, set(names))
     if not allrecs and sc: add("2 metacache", "symbols rebuilt from structure (fallback)", True, f"{len(sc)} underlyers; sample {next(iter(sc))}: expiries {[exp_label(e) for e in list(sc[next(iter(sc))])[:4]]}")
     if not allrecs and not sc: add("2 metacache", "could not find strikes in response", False, "see 'OI Probe Schema' tab — need to write a parser for this layout")
     return js, allrecs, (sc or None)
