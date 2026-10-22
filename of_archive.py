@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import dhan_probe as D
 
 SELFTEST = "--selftest" in sys.argv
-U_OF = "https://ticks.dhan.co/orderflow/getOrderFlow"; U_G = "https://ticks.dhan.co/getData"
+U_OF = "https://ticks.dhan.co/orderflow/getOrderFlow"; U_G = "https://ticks.dhan.co/getData"; U_H = "https://ticks.dhan.co/getDataH"
 OUT = "out/of"; ARCH = f"{OUT}/archive"; PREV = f"{OUT}/prev"
 for p in (ARCH, PREV): os.makedirs(p, exist_ok=True)
 BUDGET = float(os.environ.get("OF_BUDGET_MIN", "100")); T0 = time.time(); IST = "Asia/Kolkata"
@@ -74,6 +74,14 @@ def fetch_1m(sid, max_chunks=6, span=45):
     if not parts: return pd.DataFrame(columns=["t", "o", "h", "l", "c", "v"])
     return pd.concat(parts).drop_duplicates("t").sort_values("t").reset_index(drop=True)
 
+def fetch_daily(sid, sym):
+    now = int(time.time()); r = post(U_H, {"EXCH": "NSE", "SEG": "E", "INST": "EQUITY", "SEC_ID": sid, "INTERVAL": "D", "START": now - 200 * 86400, "END": now, "EXPCODE": 0, "SYM": sym})
+    if r.status_code != 200: return pd.DataFrame(columns=["date", "d_o", "d_h", "d_l", "d_c", "d_v"])
+    d = (r.json().get("data") or {})
+    if not d.get("t"): return pd.DataFrame(columns=["date", "d_o", "d_h", "d_l", "d_c", "d_v"])
+    ts = pd.to_datetime(np.array(d["t"], float), unit="s") + pd.Timedelta(hours=5, minutes=30)
+    return pd.DataFrame({"date": ts.strftime("%Y-%m-%d"), "d_o": d["o"], "d_h": d["h"], "d_l": d["l"], "d_c": d["c"], "d_v": d["v"]}).drop_duplicates("date")
+
 # ───────────────────────────── features from one footprint candle ─────────────────────────────
 def longest_run(m):
     if not m.any(): return 0
@@ -97,12 +105,15 @@ def candle_features(c):
     row["vwap"] = (p * t_).sum() / t_.sum() if t_.sum() > 0 else np.nan
     return row
 
-def build_frame(sym, of_candles, gd):
+def build_frame(sym, of_candles, gd, daily=None):
     if not of_candles: return pd.DataFrame()
     F = pd.DataFrame([candle_features(c) for c in of_candles]).drop_duplicates("t").sort_values("t").reset_index(drop=True)
     F = F.merge(gd, on="t", how="left") if len(gd) else F.assign(o=np.nan, h=np.nan, l=np.nan, c=np.nan, v=np.nan)
     ts = pd.to_datetime(F["t"], unit="s") + pd.Timedelta(hours=5, minutes=30); F["date"] = ts.dt.strftime("%Y-%m-%d"); F["hhmm"] = ts.dt.hour * 100 + ts.dt.minute
     F.insert(0, "symbol", sym)
+    if daily is not None and len(daily): F = F.merge(daily, on="date", how="left")
+    else:
+        for c in ("d_o", "d_h", "d_l", "d_c", "d_v"): F[c] = np.nan
     for c in F.columns:
         if F[c].dtype == "float64" and c not in ("t",): F[c] = F[c].astype("float32")
     return F
@@ -130,8 +141,19 @@ def quality_row(F):
         ok = (ret != 0) & (dl != 0); r["delta sign agrees with minute move %"] = (np.sign(dl[ok]) == np.sign(ret[ok])).mean() * 100 if ok.sum() else np.nan
         x = (both["delta"] / both["tot"].replace(0, np.nan)).to_numpy(float); y = (ret / both["o"].to_numpy(float)); g = np.isfinite(x) & np.isfinite(y)
         r["corr(delta/volume, return)"] = np.corrcoef(x[g], y[g])[0, 1] if g.sum() > 100 else np.nan
-        hi_b = M["hi_b"].sum(); r["share of minutes with zero-volume sell at high %"] = (M["hi_s"] == 0).mean() * 100
-    return r
+        r["share of minutes with zero-volume sell at high %"] = (M["hi_s"] == 0).mean() * 100
+    r.update(daily_check(F)); return r
+
+def daily_check(F):
+    """per day: minute feed (09:15..15:14) vs Dhan's official daily candle."""
+    M = F[(F.hhmm >= 915) & (F.hhmm < 1530)].dropna(subset=["c", "o"])
+    if M.empty or F["d_c"].notna().sum() == 0: return {}
+    g = M.groupby("date").agg(o=("o", "first"), c=("c", "last"), h=("h", "max"), l=("l", "min"), v=("tot", "sum"), d_o=("d_o", "first"), d_c=("d_c", "first"), d_h=("d_h", "first"), d_l=("d_l", "first"), d_v=("d_v", "first")).dropna(subset=["d_c"])
+    if g.empty: return {}
+    pct = lambda a, b: (a / b - 1) * 100
+    return {"days compared to official daily candle": len(g), "open: minute feed vs official, median abs diff %": pct(g.o, g.d_o).abs().median(), "last-minute (15:14) price vs official close, median abs diff %": pct(g.c, g.d_c).abs().median(),
+            "days where 15:14 vs official close differs > 0.2%": (pct(g.c, g.d_c).abs() > 0.2).mean() * 100, "high vs official, median abs diff %": pct(g.h, g.d_h).abs().median(), "low vs official, median abs diff %": pct(g.l, g.d_l).abs().median(),
+            "volume (minute feed) / official daily volume": (g.v.sum() / g.d_v.sum()) if g.d_v.sum() else np.nan}
 
 def today_row(F):
     ds = sorted(F["date"].unique()); d = ds[-1]; S = F[(F.date == d) & (F.hhmm >= 915) & (F.hhmm < 1530)]
@@ -139,11 +161,12 @@ def today_row(F):
     vol = S["tot"].sum(); last = S[S.hhmm >= 1500]; o, c = S["o"].dropna(), S["c"].dropna()
     pc = np.nan
     if len(ds) > 1:
-        P = F[(F.date == ds[-2]) & (F.hhmm >= 915) & (F.hhmm < 1530)]["c"].dropna(); pc = P.iloc[-1] if len(P) else np.nan
+        off = F[F.date == ds[-2]]["d_c"].dropna(); P = F[(F.date == ds[-2]) & (F.hhmm >= 915) & (F.hhmm < 1530)]["c"].dropna()
+        pc = off.iloc[0] if len(off) else (P.iloc[-1] if len(P) else np.nan)
     o0, c1 = (o.iloc[0] if len(o) else np.nan), (c.iloc[-1] if len(c) else np.nan)
     return {"symbol": F["symbol"].iloc[0], "date": d, "volume": vol, "delta": S["delta"].sum(), "delta % of volume": S["delta"].sum() / max(vol, 1) * 100,
             "last-30m delta % of its volume": last["delta"].sum() / max(last["tot"].sum(), 1) * 100,
-            "change % vs yesterday's close": (c1 / pc - 1) * 100 if pc == pc else np.nan, "gap % (open vs yesterday's close)": (o0 / pc - 1) * 100 if pc == pc else np.nan,
+            "change % vs yesterday's close (uses 15:14 price as today's close)": (c1 / pc - 1) * 100 if pc == pc else np.nan, "gap % (open vs yesterday's close)": (o0 / pc - 1) * 100 if pc == pc else np.nan,
             "intraday % (open 09:15 to last minute 15:14)": (c1 / o0 - 1) * 100 if o0 == o0 else np.nan}
 
 # ───────────────────────────── per stock ─────────────────────────────
@@ -151,7 +174,7 @@ def process(sym, sid):
     if time.time() - T0 > BUDGET * 60: return sym, None, "time budget reached"
     of = fetch_of(sid)
     if not of: return sym, None, "no order-flow candles"
-    F = merge_prev(sym, build_frame(sym, of, fetch_1m(sid)))
+    F = merge_prev(sym, build_frame(sym, of, fetch_1m(sid), fetch_daily(sid, sym)))
     with LOCK: fmt = save(F, sym)
     return sym, F, fmt
 
@@ -219,7 +242,12 @@ class _R:
 
 def _fake(url, body):
     if url == "scrip": return pd.DataFrame({"SEM_EXM_EXCH_ID": ["NSE"] * 8, "SEM_INSTRUMENT_NAME": ["EQUITY"] * 8, "SEM_TRADING_SYMBOL": [f"S{i:02d}" for i in range(8)], "SEM_SMST_SECURITY_ID": list(range(100, 108))})
-    sid = body["SEC_ID"]; rng = np.random.default_rng(sid); cs = _synth_of(sid, body["START"], body["END"], rng)
+    sid = body["SEC_ID"]; rng = np.random.default_rng(sid)
+    if url == U_H:
+        cs = _synth_of(sid, 0, 4e9, rng); G = pd.DataFrame([{"d": pd.Timestamp(c["t"] + 19800, unit="s").strftime("%Y-%m-%d"), "o": c["_o"], "c": c["_c"] * 1.002, "h": c["high"], "l": c["low"], "v": c["total_volume"], "t": c["t"]} for c in cs])
+        g = G.groupby("d").agg(o=("o", "first"), c=("c", "last"), h=("h", "max"), l=("l", "min"), v=("v", "sum"), t=("t", "first")).reset_index()
+        return _R({"success": True, "data": {"o": g.o.tolist(), "h": g.h.tolist(), "l": g.l.tolist(), "c": g.c.tolist(), "v": g.v.tolist(), "t": [int(pd.Timestamp(x).timestamp()) - 19800 for x in g.d], "Time": g.d.tolist()}})
+    cs = _synth_of(sid, body["START"], body["END"], rng)
     lo = body["START"]; hi = body["END"]; cs = [c for c in cs if lo <= c["t"] <= hi]
     if url == U_OF: return _R({"success": True, "data": {"instrument": "x", "interval": "1m", "candles": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cs]}})
     cs = [c for c in cs if c["time"] == "x"]; return _R({"success": True, "data": {"t": [c["t"] for c in cs], "o": [c["_o"] for c in cs], "h": [c["high"] for c in cs], "l": [c["low"] for c in cs], "c": [c["_c"] for c in cs], "v": [c["total_volume"] for c in cs]}})
