@@ -102,7 +102,21 @@ def analyse_day(F, label):
     if ok.sum() > 30: log("delta quality", f"{label}: 1-min delta sign agrees with candle direction", f"{(np.sign(m['delta'])[ok] == np.sign(ret)[ok]).mean()*100:.1f}%", f"day total delta {m['delta'].sum():,.0f} of volume {m['v'].sum():,.0f}")
     return m
 
+def jwt_info():
+    """report token lifetime and claim NAMES only (never values) so we know how long it lasts and what it is."""
+    try:
+        import base64
+        tok = json.loads(os.environ.get("DHAN_HEADERS_JSON", "{}")); tok = next((v for k, v in tok.items() if str(v).startswith("eyJ")), None)
+        if not tok: return
+        p = tok.split(".")[1]; p += "=" * (-len(p) % 4); c = json.loads(base64.urlsafe_b64decode(p))
+        exp = c.get("exp"); iat = c.get("iat")
+        fmt = lambda t: pd.Timestamp(t, unit="s", tz="UTC").tz_convert(IST).strftime("%Y-%m-%d %H:%M IST")
+        life = f"{(exp - iat) / 3600:.1f} hours" if exp and iat else "unknown"
+        log("token", "expiry", fmt(exp) if exp else "no exp claim", f"lifetime {life}; issued {fmt(iat) if iat else '?'}; claim names: {', '.join(sorted(c.keys()))}")
+    except Exception as e: log("token", "decode", "could not read", type(e).__name__)
+
 def main():
+    jwt_info()
     sec = int(os.environ.get("DHAN_SEC_ID", "13538")); today = pd.Timestamp.now(tz=IST).date(); days = last_weekdays(3)
     # 1 auth
     d0 = days[0]
