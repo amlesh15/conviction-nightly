@@ -1,0 +1,62 @@
+name: of-archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Test only: number of stocks (blank = all)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      DHAN_HEADERS_JSON: ${{ secrets.DHAN_HEADERS_JSON }}
+      STATE_DIR: ${{ github.workspace }}/state
+      OF_LIMIT: ${{ inputs.limit }}
+      OF_BUDGET_MIN: "120"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pyarrow
+      - run: python setup_env.py
+      - name: Restore the previous archive (so days the server drops are never lost)
+        run: |
+          set +e
+          mkdir -p out/of/prev
+          if git ls-remote --exit-code --heads origin of-archive >/dev/null 2>&1; then
+            git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/prev
+            cp /tmp/prev/*.parquet out/of/prev/ 2>/dev/null; cp /tmp/prev/*.csv.gz out/of/prev/ 2>/dev/null
+          fi
+          ls out/of/prev | wc -l
+      - name: Download order flow + quality check
+        run: python of_archive.py
+      - name: Save the archive on branch of-archive (one snapshot, history replaced each run)
+        if: always()
+        run: |
+          set +e
+          [ -n "$(ls -A out/of/archive 2>/dev/null)" ] || { echo "nothing to archive"; exit 0; }
+          git config --global user.name archive-bot
+          git config --global user.email archive-bot@users.noreply.github.com
+          rm -rf /tmp/arch && mkdir /tmp/arch && cp out/of/archive/* /tmp/arch/ && cd /tmp/arch
+          git init -q && git checkout -q -b of-archive && git add -A && git commit -q -m "order-flow archive $(date +%F)"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin of-archive
+      - name: Keep the quality files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: of-archive-quality
+          path: out/of/*.csv
+          retention-days: 30
+          if-no-files-found: ignore
