@@ -163,11 +163,12 @@ def today_row(F):
     if len(ds) > 1:
         off = F[F.date == ds[-2]]["d_c"].dropna(); P = F[(F.date == ds[-2]) & (F.hhmm >= 915) & (F.hhmm < 1530)]["c"].dropna()
         pc = off.iloc[0] if len(off) else (P.iloc[-1] if len(P) else np.nan)
-    o0, c1 = (o.iloc[0] if len(o) else np.nan), (c.iloc[-1] if len(c) else np.nan)
-    return {"symbol": F["symbol"].iloc[0], "date": d, "volume": vol, "delta": S["delta"].sum(), "delta % of volume": S["delta"].sum() / max(vol, 1) * 100,
+    o0 = o.iloc[0] if len(o) else np.nan; offc = F[F.date == d]["d_c"].dropna()
+    c1 = offc.iloc[0] if len(offc) else (c.iloc[-1] if len(c) else np.nan); basis = "official daily close" if len(offc) else "15:14 price (PROVISIONAL - last 15 min missing)"
+    return {"symbol": F["symbol"].iloc[0], "date": d, "volume (09:15-15:14 only)": vol, "delta": S["delta"].sum(), "delta % of volume": S["delta"].sum() / max(vol, 1) * 100,
             "last-30m delta % of its volume": last["delta"].sum() / max(last["tot"].sum(), 1) * 100,
-            "change % vs yesterday's close (uses 15:14 price as today's close)": (c1 / pc - 1) * 100 if pc == pc else np.nan, "gap % (open vs yesterday's close)": (o0 / pc - 1) * 100 if pc == pc else np.nan,
-            "intraday % (open 09:15 to last minute 15:14)": (c1 / o0 - 1) * 100 if o0 == o0 else np.nan}
+            "gap % (open vs yesterday's close)": (o0 / pc - 1) * 100 if pc == pc else np.nan, "intraday % (open to close)": (c1 / o0 - 1) * 100 if o0 == o0 else np.nan,
+            "change % vs yesterday's close": (c1 / pc - 1) * 100 if pc == pc else np.nan, "close used": basis}
 
 # ───────────────────────────── per stock ─────────────────────────────
 def process(sym, sid):
