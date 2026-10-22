@@ -134,11 +134,17 @@ def quality_row(F):
     return r
 
 def today_row(F):
-    d = F["date"].max(); S = F[(F.date == d) & (F.hhmm >= 915) & (F.hhmm < 1530)]
+    ds = sorted(F["date"].unique()); d = ds[-1]; S = F[(F.date == d) & (F.hhmm >= 915) & (F.hhmm < 1530)]
     if len(S) < 50: return None
-    vol = S["tot"].sum(); last = S[S.hhmm >= 1500]
-    return {"symbol": F["symbol"].iloc[0], "date": d, "volume": vol, "delta": S["delta"].sum(), "delta % of volume": S["delta"].sum() / max(vol, 1) * 100, "last-30m delta % of its volume": last["delta"].sum() / max(last["tot"].sum(), 1) * 100,
-            "price change %": (S["c"].iloc[-1] / S["o"].iloc[0] - 1) * 100 if S["c"].notna().any() and S["o"].notna().any() else np.nan}
+    vol = S["tot"].sum(); last = S[S.hhmm >= 1500]; o, c = S["o"].dropna(), S["c"].dropna()
+    pc = np.nan
+    if len(ds) > 1:
+        P = F[(F.date == ds[-2]) & (F.hhmm >= 915) & (F.hhmm < 1530)]["c"].dropna(); pc = P.iloc[-1] if len(P) else np.nan
+    o0, c1 = (o.iloc[0] if len(o) else np.nan), (c.iloc[-1] if len(c) else np.nan)
+    return {"symbol": F["symbol"].iloc[0], "date": d, "volume": vol, "delta": S["delta"].sum(), "delta % of volume": S["delta"].sum() / max(vol, 1) * 100,
+            "last-30m delta % of its volume": last["delta"].sum() / max(last["tot"].sum(), 1) * 100,
+            "change % vs yesterday's close": (c1 / pc - 1) * 100 if pc == pc else np.nan, "gap % (open vs yesterday's close)": (o0 / pc - 1) * 100 if pc == pc else np.nan,
+            "intraday % (open 09:15 to last minute 15:14)": (c1 / o0 - 1) * 100 if o0 == o0 else np.nan}
 
 # ───────────────────────────── per stock ─────────────────────────────
 def process(sym, sid):
