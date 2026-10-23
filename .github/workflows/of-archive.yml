@@ -51,7 +51,7 @@ jobs:
           rm -rf /tmp/arch && mkdir /tmp/arch && cp out/of/archive/* /tmp/arch/ && cd /tmp/arch
           git init -q && git checkout -q -b of-archive && git add -A && git commit -q -m "order-flow archive $(date +%F)"
           git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-          git push -f origin of-archive
+          git push -f origin of-archive || { echo "::error::PUSH FAILED - archive was NOT saved on branch of-archive"; exit 1; }
       - name: Keep the quality files
         if: always()
         uses: actions/upload-artifact@v4

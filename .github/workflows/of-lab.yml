@@ -25,7 +25,9 @@ jobs:
       - run: python setup_env.py
       - name: Fetch the saved order-flow archive (branch of-archive)
         run: |
-          git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/arch
+          if ! git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/arch; then
+            echo "::error::Branch of-archive does not exist - the of-archive run did not save it. Check its 'Save the archive' step."; exit 1
+          fi
           mkdir -p out/of/archive && cp /tmp/arch/*.parquet out/of/archive/ 2>/dev/null; cp /tmp/arch/*.csv.gz out/of/archive/ 2>/dev/null
           ls out/of/archive | wc -l
       - name: Order-flow lab
