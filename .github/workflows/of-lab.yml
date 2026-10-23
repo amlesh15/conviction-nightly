@@ -28,8 +28,11 @@ jobs:
           if ! git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/arch; then
             echo "::error::Branch of-archive does not exist - the of-archive run did not save it. Check its 'Save the archive' step."; exit 1
           fi
-          mkdir -p out/of/archive && cp /tmp/arch/*.parquet out/of/archive/ 2>/dev/null; cp /tmp/arch/*.csv.gz out/of/archive/ 2>/dev/null
-          ls out/of/archive | wc -l
+          mkdir -p out/of/archive
+          cp /tmp/arch/*.parquet out/of/archive/ 2>/dev/null || true
+          cp /tmp/arch/*.csv.gz out/of/archive/ 2>/dev/null || true
+          N=$(ls out/of/archive | wc -l); echo "archive files: $N"
+          [ "$N" -gt 0 ] || { echo "::error::The of-archive branch has no data files"; exit 1; }
       - name: Order-flow lab
         run: python of_lab.py
       - name: Keep the result files
