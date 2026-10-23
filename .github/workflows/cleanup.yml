@@ -1,0 +1,41 @@
+name: cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "false = only show what would move (safe preview); true = really move them"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move finished experiments into _old/
+        run: |
+          LIST="strike_engine.py strategy_lab.py oi_case.py oi_discover.py oi_e2check.py oi_universe.py dhan_probe2.py check_nse.py volume_delta.py dhan_depth.py"
+          mkdir -p _old
+          MOVED=0
+          for f in $LIST; do
+            if [ -e "$f" ]; then
+              echo "would move: $f"; MOVED=$((MOVED+1))
+              if [ "${{ inputs.apply }}" = "true" ]; then git mv "$f" "_old/$f"; fi
+            else
+              echo "not found (fine): $f"
+            fi
+          done
+          echo "files affected: $MOVED"
+          echo "---- these stay in place (everything else in the repo root) ----"
+          ls
+          if [ "${{ inputs.apply }}" = "true" ] && [ "$MOVED" -gt 0 ]; then
+            git config user.name "cleanup"; git config user.email "cleanup@users.noreply.github.com"
+            git commit -m "Move finished experiments into _old/"
+            git push
+            echo "DONE - moved $MOVED files into _old/ (they are still in git history and can be moved back)"
+          fi
