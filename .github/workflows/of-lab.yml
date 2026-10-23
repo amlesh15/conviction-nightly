@@ -1,0 +1,40 @@
+name: of-lab
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      STATE_DIR: ${{ github.workspace }}/state
+      OF_ARCH: ${{ github.workspace }}/out/of/archive
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pyarrow scikit-learn
+      - run: python setup_env.py
+      - name: Fetch the saved order-flow archive (branch of-archive)
+        run: |
+          git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/arch
+          mkdir -p out/of/archive && cp /tmp/arch/*.parquet out/of/archive/ 2>/dev/null; cp /tmp/arch/*.csv.gz out/of/archive/ 2>/dev/null
+          ls out/of/archive | wc -l
+      - name: Order-flow lab
+        run: python of_lab.py
+      - name: Keep the result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: of-lab
+          path: out/of_lab/*.csv
+          retention-days: 90
+          if-no-files-found: ignore
