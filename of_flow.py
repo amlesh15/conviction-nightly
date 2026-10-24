@@ -86,26 +86,33 @@ def levels_end_of(sym, d, g, profiles):
 
 # ────────────────────────── trade simulation (daily bars, conservative) ──────────────────────────
 def sim_trade(op, hi, lo, cl, s, entry, stop, t1, mode):
-    """returns (status, R_net, filled). bars are the sessions AFTER the signal session (up to HOLD)."""
+    """returns (status, R_net, filled). bars are the sessions AFTER the signal session (up to HOLD).
+    pullback: limit order fills when price trades back to the entry; R unit = planned risk (entry-stop); on the FILL day only the stop is checked (the target may have printed before the fill);
+              a gap open through the stop = skipped.
+    open: enter at the next open; R unit = actual risk (open-stop); skipped if gapped past the stop or if less than 1R is left to target 1 (the 'do not chase' rule)."""
     n = min(len(op), HOLD)
     if n == 0: return "open", np.nan, False
     risk0 = s * (entry - stop)
     if risk0 <= 0: return "bad plan", np.nan, False
     k0 = None; ep = None
-    if mode == "open": k0 = 0; ep = op[0]
+    if mode == "open":
+        k0 = 0; ep = op[0]; risk = s * (ep - stop)
+        if risk < 0.2 * risk0: return "skipped (gapped past stop)", np.nan, False
+        if s * (t1 - ep) < 1.0 * risk: return "skipped (no chase: under 1R to target)", np.nan, False
     else:
         for k in range(n):
             if (s > 0 and lo[k] <= entry) or (s < 0 and hi[k] >= entry): k0 = k; ep = (min(op[k], entry) if s > 0 else max(op[k], entry)); break
         if k0 is None: return ("no fill" if len(op) >= HOLD else "open"), np.nan, False
-    risk = s * (ep - stop)
-    if mode == "open" and risk < 0.2 * risk0: return "skipped (gapped past stop)", np.nan, False
-    cost_R = COST * 1e-4 * ep / max(risk, 1e-9)
+        if s * (ep - stop) <= 0.2 * risk0: return "skipped (gapped past stop)", np.nan, False
+        risk = risk0
+    cost_R = COST * 1e-4 * ep / risk
     for k in range(k0, n):
         o, h, l = op[k], hi[k], lo[k]
-        if k > k0 or mode == "open" and k > 0:
+        if k > k0 or (mode == "open" and k > 0):
             if (s > 0 and o <= stop) or (s < 0 and o >= stop): return "stopped", s * (o - ep) / risk - cost_R, True
             if (s > 0 and o >= t1) or (s < 0 and o <= t1): return "target", s * (o - ep) / risk - cost_R, True
         if (s > 0 and l <= stop) or (s < 0 and h >= stop): return "stopped", s * (stop - ep) / risk - cost_R, True
+        if k == k0 and mode == "pullback": continue
         if (s > 0 and h >= t1) or (s < 0 and l <= t1): return "target", s * (t1 - ep) / risk - cost_R, True
     if len(op) >= HOLD: return "time exit", s * (cl[n - 1] - ep) / risk - cost_R, True
     return "open", np.nan, True
@@ -130,8 +137,7 @@ def scorecard(J):
                 G = X[sel & (X["group"] == grp)]; st = G[f"status_{mode}"]; done = G[st.isin(["stopped", "target", "time exit"])]; v = done[f"R_{mode}"].to_numpy(float)
                 if len(G) == 0: continue
                 m, lo, hi, p, nd = L.cmean(v, done["date"].to_numpy()) if len(v) >= 30 else (np.nanmean(v) if len(v) else np.nan, np.nan, np.nan, np.nan, done["date"].nunique())
-                rows.append({"rows": srcname, "group": grp, "entry": "pullback limit" if mode == "pullback" else "next open", "setups": len(G), "filled/triggered": int(done.shape[0] + (st == "open").sum() * 0), "fill %": (st.isin(["stopped", "target", "time exit", "open"]) & (st != "")).mean() * 100 if mode == "open" else
-                             (st.isin(["stopped", "target", "time exit"]).mean() * 100), "resolved": len(done), "mean R (net of cost)": m, "CI low": lo, "CI high": hi, "hit %": (v > 0).mean() * 100 if len(v) else np.nan,
+                rows.append({"rows": srcname, "group": grp, "entry": "pullback limit" if mode == "pullback" else "next open", "setups": len(G), "filled/triggered": int(st.isin(["stopped", "target", "time exit", "open"]).sum()), "fill %": st.isin(["stopped", "target", "time exit", "open"]).mean() * 100, "resolved": len(done), "mean R (net of cost)": m, "CI low": lo, "CI high": hi, "hit %": (v > 0).mean() * 100 if len(v) else np.nan,
                              "target %": (done[f"status_{mode}"] == "target").mean() * 100 if len(done) else np.nan, "stopped %": (done[f"status_{mode}"] == "stopped").mean() * 100 if len(done) else np.nan,
                              "read": ("too few (<60 resolved)" if len(done) < 60 else ("positive" if (not np.isnan(lo) and lo > 0) else "negative" if (not np.isnan(hi) and hi < 0) else "not distinguishable from 0"))})
     SC = pd.DataFrame(rows)
@@ -231,12 +237,15 @@ def unit_tests():
     st, r, f = sim_trade(op, hi, lo, cl, 1, 99.5, 96.0, 105.0, "pullback"); assert st == "target" and f, (st, r)                  # fills day0 low 99<=99.5, target 105 day3 high 105
     st, r, f = sim_trade(op, hi, lo, cl, 1, 99.5, 99.0, 110.0, "pullback"); assert st == "stopped" and r < -0.9, (st, r)         # day0 low 99 touches stop 99 right after fill
     st, r, f = sim_trade(op, hi, lo, cl, 1, 90.0, 85.0, 110.0, "pullback"); assert st == "no fill", st
-    st, r, f = sim_trade(op, hi, lo, cl, -1, 104.0, 106.5, 98.0, "open"); assert st in ("stopped", "target", "time exit", "skipped (gapped past stop)"), st
+    st, r, f = sim_trade(op, hi, lo, cl, -1, 104.0, 106.5, 98.0, "open"); assert st.startswith("skipped"), st
     st, r, f = sim_trade(op, hi, lo, cl, 1, 100.0, 90.0, 120.0, "open"); assert st == "time exit" and abs(r - ((105 - 100) / 10 - COST * 1e-4 * 100 / 10)) < 1e-6, (st, r)
     f = {"d5": 0.06, "dds": 0.10, "trapnet": 0.2, "loc": 1, "accepted": True, "mig": 1, "swp_up": False, "swp_dn": False}
     net, pts, state = read_points(f, 1); assert state == "CONFIRMED" and net == 5, (net, state)
     net, pts, state = read_points(f, -1); assert state == "CONTRADICTED", (net, state)
     f2 = dict(f, swp_up=True, trapnet=-0.2, d5=0.0, dds=0.0, loc=0, mig=0); net, pts, state = read_points(f2, 1); assert state == "CONTRADICTED", (net, state)   # failed breakout with our side trapped = veto
+    st, r, f = sim_trade(np.array([100., 100, 100]), np.array([103., 100, 100]), np.array([96., 100, 100]), np.array([100., 100, 100]), 1, 98.0, 94.0, 102.0, "pullback"); assert st == "time exit" or st == "open", st   # fill day: target ignored
+    st, r, f = sim_trade(np.array([90., 100, 100]), np.array([91., 100, 100]), np.array([89., 100, 100]), np.array([90., 100, 100]), 1, 98.0, 85.0, 120.0, "pullback"); assert abs(r - ((120 - 90) / 13)) < 5 or st != "stopped", (st, r)
+    st, r, f = sim_trade(np.array([84., 100, 100]), np.array([86., 100, 100]), np.array([83., 100, 100]), np.array([84., 100, 100]), 1, 98.0, 85.0, 120.0, "pullback"); assert st.startswith("skipped"), st   # gap through stop
     print("unit tests ok")
 
 def synth_flow(plant=False):
