@@ -1,0 +1,45 @@
+name: of-flow
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      STATE_DIR: ${{ github.workspace }}/state
+      OF_ARCH: ${{ github.workspace }}/out/of/archive
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pyarrow scikit-learn
+      - run: python setup_env.py
+      - name: Fetch the saved order-flow archive (branch of-archive)
+        run: |
+          if ! git clone --depth 1 --branch of-archive "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" /tmp/arch; then
+            echo "::error::Branch of-archive does not exist - the of-archive run did not save it. Check its 'Save the archive' step."; exit 1
+          fi
+          mkdir -p out/of/archive
+          cp /tmp/arch/*.parquet out/of/archive/ 2>/dev/null || true
+          cp /tmp/arch/*.csv.gz out/of/archive/ 2>/dev/null || true
+          N=$(ls out/of/archive | wc -l); echo "archive files: $N"
+          [ "$N" -gt 0 ] || { echo "::error::The of-archive branch has no data files"; exit 1; }
+      - name: Flow confirmation board and journal
+        run: python of_flow.py
+      - name: Keep the result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: of-flow
+          path: out/of_flow/*.csv
+          retention-days: 90
+          if-no-files-found: ignore
