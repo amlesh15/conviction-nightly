@@ -105,6 +105,30 @@ def candle_features(c):
     row["vwap"] = (p * t_).sum() / t_.sum() if t_.sum() > 0 else np.nan
     return row
 
+def profile_frame(of_candles):
+    """volume-at-price by 30-minute period and price bin (bin width ~5 bps of price, constant per stock): buy and sell volume. 09:15-15:14 only."""
+    D, Pm, PX, Bv, Sv = [], [], [], [], []
+    for c in of_candles:
+        t = c["t"]; m = ((t + 19800) % 86400) // 60 - 555; lv = c.get("levels") or []
+        if m < 0 or m >= 360 or not lv: continue
+        n = len(lv); D += [(t + 19800) // 86400] * n; Pm += [m // 30] * n; PX += [x["price"] for x in lv]; Bv += [x.get("buy_volume", 0) for x in lv]; Sv += [x.get("sell_volume", 0) for x in lv]
+    if not D: return pd.DataFrame(columns=["date", "per", "bin", "w", "buy", "sell"])
+    P = pd.DataFrame({"day": D, "per": Pm, "px": PX, "buy": Bv, "sell": Sv}); w = max(0.05, round(0.0005 * float(P["px"].median()) / 0.05) * 0.05)
+    P["bin"] = np.floor(P["px"] / w + 1e-9).astype(int); P["date"] = pd.to_datetime(P["day"] * 86400, unit="s").dt.strftime("%Y-%m-%d")
+    G = P.groupby(["date", "per", "bin"], as_index=False)[["buy", "sell"]].sum(); G["w"] = np.float32(w); G["buy"] = G["buy"].astype("int64"); G["sell"] = G["sell"].astype("int64"); return G[["date", "per", "bin", "w", "buy", "sell"]]
+
+def merge_prev_profile(sym, G):
+    for ext, fn in ((".parquet", pd.read_parquet), (".csv.gz", pd.read_csv)):
+        pth = f"{PREV}/prof_{sym}{ext}"
+        if os.path.exists(pth):
+            try: P = fn(pth); return pd.concat([G, P[~P["date"].isin(G["date"].unique())]]).sort_values(["date", "per", "bin"]).reset_index(drop=True)
+            except Exception: pass
+    return G
+
+def save_profile(G, sym):
+    try: G.to_parquet(f"{ARCH}/prof_{sym}.parquet", index=False, compression="zstd")
+    except Exception: G.to_csv(f"{ARCH}/prof_{sym}.csv.gz", index=False)
+
 def build_frame(sym, of_candles, gd, daily=None):
     if not of_candles: return pd.DataFrame()
     F = pd.DataFrame([candle_features(c) for c in of_candles]).drop_duplicates("t").sort_values("t").reset_index(drop=True)
@@ -175,8 +199,8 @@ def process(sym, sid):
     if time.time() - T0 > BUDGET * 60: return sym, None, "time budget reached"
     of = fetch_of(sid)
     if not of: return sym, None, "no order-flow candles"
-    F = merge_prev(sym, build_frame(sym, of, fetch_1m(sid), fetch_daily(sid, sym)))
-    with LOCK: fmt = save(F, sym)
+    F = merge_prev(sym, build_frame(sym, of, fetch_1m(sid), fetch_daily(sid, sym))); G = merge_prev_profile(sym, profile_frame(of))
+    with LOCK: fmt = save(F, sym); save_profile(G, sym)
     return sym, F, fmt
 
 def universe_ids(symbols):
@@ -258,5 +282,8 @@ if __name__ == "__main__":
         TRANSPORT = _fake; Q, C, T = main(); a = Q.iloc[0]
         assert a["sessions"] >= 20 and 0.9 < a["volume vs price-feed (ratio)"] < 1.1, a.to_dict()
         assert a["delta sign agrees with minute move %"] > 60 and a["corr(delta/volume, return)"] > 0.3, "synthetic planted relation not detected"
+        pf = [f for f in os.listdir(ARCH) if f.startswith("prof_")]; assert len(pf) == 8, pf
+        G = pd.read_csv(f"{ARCH}/prof_S00.csv.gz"); Fm = pd.read_csv(f"{ARCH}/S00.csv.gz"); Fm = Fm[(Fm.hhmm >= 915) & (Fm.hhmm < 1515)]
+        assert abs((G.buy.sum() + G.sell.sum()) / Fm["tot"].sum() - 1) < 0.01, "profile volume != minute volume"; print("profile rows", len(G), "dates", G.date.nunique())
         print(sorted(os.listdir(ARCH))[:3], "SELFTEST OK")
     else: main()

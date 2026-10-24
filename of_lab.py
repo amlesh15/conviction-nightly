@@ -32,6 +32,7 @@ def read_any(p):
 def load_minutes():
     fr = []
     for f in sorted(glob.glob(f"{ARCH}/*.parquet") + glob.glob(f"{ARCH}/*.csv.gz")):
+        if os.path.basename(f).startswith("prof_"): continue
         d = read_any(f)
         if d is None: continue
         for c in COLS:
