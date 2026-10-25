@@ -90,7 +90,7 @@ def find_cross(df, now):
 
 # ───────────────────────────── alert ─────────────────────────────
 def tg_send(text):
-    tok = os.environ.get("EMA_TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_TOKEN"); chat = os.environ.get("EMA_TELEGRAM_CHAT_ID", "")
+    tok = (os.environ.get("EMA_TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_TOKEN") or "").strip(); chat = os.environ.get("EMA_TELEGRAM_CHAT_ID", "").strip()
     if not tok or not chat: print("EMA Telegram channel not configured (EMA_TELEGRAM_CHAT_ID missing)"); return False
     try:
         data = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode()
@@ -256,9 +256,22 @@ def run_cycle(sh):
         if events or ups: put_scorecard(sh, table)
     return len(events)
 
+def setup_test(sh):
+    """Creates the log tab (header only) and sends one test message to the EMA channel. Works at any hour."""
+    import gspread
+    try: sh.worksheet(TAB); print(f"tab '{TAB}' already exists")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=TAB, rows=2000, cols=len(HDR) + 2); ws.update(values=[HDR], range_name="A1")
+        try: ws.freeze(rows=1)
+        except Exception: pass
+        print(f"created tab '{TAB}'")
+    ok = tg_send("✅ EMA cross alert channel is connected. Real alerts will appear here during market hours.")
+    print("telegram test message sent" if ok else "telegram test FAILED: check EMA_TELEGRAM_CHAT_ID (starts with -100) and that the bot is an admin of the channel")
+
 def main(mode):
     import live_refresh_local as LR
-    sh = LR.open_sheet(); print("REHEARSAL (FORCE)" if FORCE else "live", "| mode", mode)
+    sh = LR.open_sheet()
+    if mode == "test": setup_test(sh); return; print("REHEARSAL (FORCE)" if FORCE else "live", "| mode", mode)
     while True:
         try: run_cycle(sh)
         except Exception as e: print("cycle error:", type(e).__name__, e)
