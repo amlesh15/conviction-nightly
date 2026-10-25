@@ -1,0 +1,40 @@
+name: trigger-backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "First session to backfill (YYYY-MM-DD)"
+        default: "2026-10-19"
+      to_date:
+        description: "Last session (blank = latest)"
+        default: ""
+      dry:
+        description: "Dry run (print only, write nothing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      STATE_DIR: ${{ github.workspace }}/state
+      BF_FROM: ${{ inputs.from_date }}
+      BF_TO: ${{ inputs.to_date }}
+      BF_DRY: ${{ inputs.dry }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python setup_env.py
+      - run: python trigger_backfill.py
