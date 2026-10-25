@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "loop = keep watching until 15:45 IST, once = one pass"
+        description: "loop = keep watching until 15:45 IST, once = one pass, test = create the tab and send one test message (any hour)"
         type: choice
-        options: [loop, once]
+        options: [loop, once, test]
         default: loop
       force:
         description: "Rehearsal: ignore market hours, print only, write nothing"
@@ -44,7 +44,8 @@ jobs:
       - run: python setup_env.py
       - name: Preflight (market hours + cookie check)
         id: pre
+        if: inputs.mode != 'test'
         run: python preflight.py live
       - name: EMA 9/26 cross alerts on ATM options
-        if: steps.pre.outputs.go == 'true'
+        if: inputs.mode == 'test' || steps.pre.outputs.go == 'true'
         run: python ema_cross_alert.py ${{ inputs.mode }}
