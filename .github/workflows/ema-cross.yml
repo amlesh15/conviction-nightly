@@ -1,0 +1,50 @@
+name: ema-cross-alerts
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "loop = keep watching until 15:45 IST, once = one pass"
+        type: choice
+        options: [loop, once]
+        default: loop
+      force:
+        description: "Rehearsal: ignore market hours, print only, write nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ema-cross
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 400
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      EMA_TELEGRAM_TOKEN: ${{ secrets.EMA_TELEGRAM_TOKEN }}
+      EMA_TELEGRAM_CHAT_ID: ${{ secrets.EMA_TELEGRAM_CHAT_ID }}
+      STATE_DIR: ${{ github.workspace }}/state
+      FORCE: ${{ inputs.force }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python setup_env.py
+      - name: Preflight (market hours + cookie check)
+        id: pre
+        run: python preflight.py live
+      - name: EMA 9/26 cross alerts on ATM options
+        if: steps.pre.outputs.go == 'true'
+        run: python ema_cross_alert.py ${{ inputs.mode }}
