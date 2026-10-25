@@ -1,0 +1,54 @@
+name: vp-monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "once = one pass, loop = keep watching until 15:30 IST"
+        type: choice
+        options: [loop, once]
+        default: loop
+      force:
+        description: "Ignore market hours (for testing)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: vp-monitor
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 400
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      STATE_DIR: ${{ github.workspace }}/state
+      FORCE: ${{ inputs.force }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore small state (alert debounce)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - run: python setup_env.py
+      - name: Preflight (market hours + cookie check)
+        id: pre
+        run: python preflight.py live
+      - name: Watch volume-profile levels
+        if: steps.pre.outputs.go == 'true'
+        run: python vp_monitor.py ${{ inputs.mode }}
