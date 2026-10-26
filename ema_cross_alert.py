@@ -116,7 +116,7 @@ def outcomes_for_row(row, ix, now, mcache, hcache):
     out = {}
     try: t0 = dt.datetime.strptime(row[ix["date"]] + " " + row[ix["time"]], "%Y-%m-%d %H:%M")
     except Exception: return out
-    if (now - t0).days > 7: return out
+    if (now - t0).days > 14: return out
     osym = row[ix["option"]]; entry = TE._num(row[ix["entry prem"]])
     if not osym or not entry: return out
     cell = lambda c: row[ix[c]] if ix[c] < len(row) else ""
@@ -190,21 +190,28 @@ def scan(scores, now, existing_counts, existing_keys):
         for side, typ in (("CALL", "CE"), ("PUT", "PE")):
             if gate(side, d["sc"]) and existing_counts.get((now.strftime("%Y-%m-%d"), sym, side), 0) < MAX_PER_DAY: work.append((sym, side, typ))
     print(f"gate passed: {sum(1 for w in work if w[1]=='CALL')} CALL candidates, {sum(1 for w in work if w[1]=='PUT')} PUT candidates")
+    stat = {"checked": 0, "no ATM": 0, "no candles": 0, "too short": 0, "9 above 26 now": 0, "cross in last 2 candles": 0, "errors": 0}
     def one(w):
         sym, side, typ = w
+        stat["checked"] += 1
         try:
             a = get_atm(sym)
-            if not a: return None
+            if not a: stat["no ATM"] += 1; return None
             osym = a[typ](); h = get_hourly(osym, now)
-            if h is None or h.empty: return None
+            if h is None or h.empty: stat["no candles"] += 1; return None
+            dd = completed_hourly(h, now)
+            if len(dd) < SLOW + 3: stat["too short"] += 1; return None
+            e9, e26 = emas(dd["close"]); stat["9 above 26 now"] += int(e9[-1] > e26[-1])
+            stat["cross in last 2 candles"] += int(any(e9[i] > e26[i] and e9[i - 1] <= e26[i - 1] for i in (len(dd) - 1, len(dd) - 2)))
             cr = find_cross(h, now)
             if not cr: return None
             key = (cr["end"].strftime("%Y-%m-%d"), cr["end"].strftime("%H:%M"), sym, side)
             if key in existing_keys: return None
             return {"sym": sym, "side": side, "osym": osym, "strike": a["atm"], "expiry": str(a["expiry"]), "cross": cr,
                     "sc": scores[sym]["sc"], "spot": scores[sym]["ltp"], "key": key}
-        except Exception as e: print(f"  {sym} {side}: {type(e).__name__}: {e}"); return None
+        except Exception as e: stat["errors"] += 1; print(f"  {sym} {side}: {type(e).__name__}: {e}"); return None
     with cf.ThreadPoolExecutor(max_workers=WORKERS) as ex: res = [r for r in ex.map(one, work) if r]
+    print("summary:", ", ".join(f"{k} {v}" for k, v in stat.items()))
     return res
 
 def event_row(ev, now):
