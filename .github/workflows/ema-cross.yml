@@ -1,11 +1,6 @@
 name: ema-cross-alerts
 
 on:
-  schedule:
-    # Hourly candles complete at 10:15, 11:15 ... 15:15 and 15:30 IST (= 04:45 ... 09:45 and 10:00 UTC).
-    # Check 2 and 12 minutes after each, so a late start still catches it.
-    - cron: "47,57 4-9 * * 1-5"
-    - cron: "2,10 10 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
