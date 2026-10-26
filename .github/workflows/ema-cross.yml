@@ -1,6 +1,11 @@
 name: ema-cross-alerts
 
 on:
+  schedule:
+    # Hourly candles complete at 10:15, 11:15 ... 15:15 and 15:30 IST (= 04:45 ... 09:45 and 10:00 UTC).
+    # Check 2 and 12 minutes after each, so a late start still catches it.
+    - cron: "47,57 4-9 * * 1-5"
+    - cron: "2,10 10 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -15,7 +20,7 @@ on:
 
 concurrency:
   group: ema-cross
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -23,7 +28,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 400
+    timeout-minutes: 355
     env:
       GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
       SHEET_ID: ${{ secrets.SHEET_ID }}
@@ -41,6 +46,12 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Restore small state (cookie warning once a day)
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}
+          restore-keys: state-
       - run: python setup_env.py
       - name: Preflight (market hours + cookie check)
         id: pre
@@ -48,4 +59,4 @@ jobs:
         run: python preflight.py live
       - name: EMA 9/26 cross alerts on ATM options
         if: inputs.mode == 'test' || steps.pre.outputs.go == 'true'
-        run: python ema_cross_alert.py ${{ inputs.mode }}
+        run: python ema_cross_alert.py ${{ inputs.mode || 'once' }}
