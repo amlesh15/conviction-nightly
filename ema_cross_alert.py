@@ -26,7 +26,7 @@ import trigger_engine as TE
 IST = ZoneInfo("Asia/Kolkata")
 FAST, SLOW = 9, 26
 SCORE_MIN = float(os.environ.get("EMA_SCORE_MIN", 20)); LOOP_MIN = int(os.environ.get("EMA_LOOP_MIN", 5))
-MAX_PER_DAY = int(os.environ.get("EMA_MAX_PER_DAY", 2)); FRESH_MIN = 95; SEED_DAYS = 15; WORKERS = 6
+MAX_PER_DAY = int(os.environ.get("EMA_MAX_PER_DAY", 2)); FRESH_MIN = 95; SEED_DAYS = int(os.environ.get("EMA_SEED_DAYS", 30)); WORKERS = 6
 FORCE = os.environ.get("FORCE", "").lower() == "true"
 TAB, SC_TAB = "EMA Cross Triggers", "EMA Cross Scorecard"
 HDR = ["date", "time", "alert time", "symbol", "side", "option", "strike", "expiry", "spot", "entry prem", "ema9", "ema26", "gap%",
@@ -190,6 +190,7 @@ def scan(scores, now, existing_counts, existing_keys):
         for side, typ in (("CALL", "CE"), ("PUT", "PE")):
             if gate(side, d["sc"]) and existing_counts.get((now.strftime("%Y-%m-%d"), sym, side), 0) < MAX_PER_DAY: work.append((sym, side, typ))
     print(f"gate passed: {sum(1 for w in work if w[1]=='CALL')} CALL candidates, {sum(1 for w in work if w[1]=='PUT')} PUT candidates")
+    bars_seen = []
     stat = {"checked": 0, "no ATM": 0, "no candles": 0, "too short": 0, "9 above 26 now": 0, "cross in last 2 candles": 0, "errors": 0}
     def one(w):
         sym, side, typ = w
@@ -199,7 +200,7 @@ def scan(scores, now, existing_counts, existing_keys):
             if not a: stat["no ATM"] += 1; return None
             osym = a[typ](); h = get_hourly(osym, now)
             if h is None or h.empty: stat["no candles"] += 1; return None
-            dd = completed_hourly(h, now)
+            dd = completed_hourly(h, now); bars_seen.append(len(dd))
             if len(dd) < SLOW + 3: stat["too short"] += 1; return None
             e9, e26 = emas(dd["close"]); stat["9 above 26 now"] += int(e9[-1] > e26[-1])
             stat["cross in last 2 candles"] += int(any(e9[i] > e26[i] and e9[i - 1] <= e26[i - 1] for i in (len(dd) - 1, len(dd) - 2)))
@@ -211,7 +212,7 @@ def scan(scores, now, existing_counts, existing_keys):
                     "sc": scores[sym]["sc"], "spot": scores[sym]["ltp"], "key": key}
         except Exception as e: stat["errors"] += 1; print(f"  {sym} {side}: {type(e).__name__}: {e}"); return None
     with cf.ThreadPoolExecutor(max_workers=WORKERS) as ex: res = [r for r in ex.map(one, work) if r]
-    print("summary:", ", ".join(f"{k} {v}" for k, v in stat.items()))
+    print("summary:", ", ".join(f"{k} {v}" for k, v in stat.items()), f"| hourly candles per option: median {int(np.median(bars_seen)) if bars_seen else 0}, need {SLOW + 3}")
     return res
 
 def event_row(ev, now):
