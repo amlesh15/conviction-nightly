@@ -33,8 +33,8 @@ def overlay(daily, all_dates):
     items = sorted(daily, key=lambda x: x[1]["ctr"]); cl = []
     for d, z in items:
         for c in cl:
-            if abs(c["mean"] - z["ctr"]) <= JOIN: c["m"].append((d, z)); c["mean"] = float(np.mean([q["ctr"] for _, q in c["m"]])); break
-        else: cl.append({"m": [(d, z)], "mean": z["ctr"]})
+            if abs(c["anchor"] - z["ctr"]) <= JOIN: c["m"].append((d, z)); c["mean"] = float(np.mean([q["ctr"] for _, q in c["m"]])); break
+        else: cl.append({"m": [(d, z)], "mean": z["ctr"], "anchor": z["ctr"]})
     out = []
     for c in cl:
         ds = sorted({d for d, _ in c["m"]}); first, last = ds[0], ds[-1]; since = [x for x in all_dates if x >= first]
@@ -83,6 +83,11 @@ def main():
     NL.sheet_put(sh, "Nifty Zones Final", hdr, rows + [[], ["contract", name, "last price", round(last, 1), "as-of days", f"{asof[0]} -> {asof[-1]} ({len(asof)} days)", f"history before start: {n_anch} sessions", f"run {stamp}"],
         ["how to read", "Each as-of day uses only data up to that day. A zone that shows up on many days, in the same place, is persistent. 'evidence' is the zone's proof record on the latest day it appeared."],
         ["caution", "Before the 27 Oct expiry this contract was the FAR month (thin volume, price offset by the carry). Zones from those days are indicative only."]])
+    chk = []
+    for d in ds:
+        b = B[B["date"] == d]; chk.append([d, len(b), round(float(b["hi"].iloc[0] + b["lo"].iloc[0]) / 2, 1), round(float(b["hi"].max()), 1), round(float(b["lo"].min()), 1),
+                                          round(float(b["hi"].iloc[-1] + b["lo"].iloc[-1]) / 2, 1), int(b["tot"].sum())])
+    NL.sheet_put(sh, "Nifty Sessions Check", ["date", "minute bars", "open", "high", "low", "last", "volume"], chk[::-1])
     log = [[D, z["lo"], z["hi"], z["ctr"], z["tier"], z["role"], z["touches"], z["react"], z["brk"], ", ".join(z["src"])] for D in asof for z in sorted(stored[D], key=lambda q: -q["ctr"])]
     NL.sheet_put(sh, "Nifty Zones By Date", ["as of", "zone from", "zone to", "centre", "evidence", "acts as", "touches", "reacted", "broke", "made of"], log)
     wf, used = forward_test(B, L, stored, asof)

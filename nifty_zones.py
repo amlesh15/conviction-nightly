@@ -4,8 +4,7 @@
 #                 absorption minutes, swing highs/lows (30-min pivots), yesterday's high/low.
 #   2 ZONES       candidates within MERGE points become one band of +-HALF points around their weighted centre (a ~30-point band).
 #   3 PROOF       replay every 1-minute bar of the month. A TOUCH = price enters the band after being outside it (from above = a support test,
-#                 from below = a resistance test), then within 60 minutes either REACTS (moves REACT points back away before breaking REACT points
-#                 through the far edge) or BREAKS. Counted per zone with avg bounce size and the last time it worked.
+#                 from below = a resistance test), then within 60 minutes either REACTS (moves REACT points back away (= one band width) before trading through the whole band) or BREAKS. Counted per zone with avg bounce size and the last time it worked.
 #   4 FILTER      kept only if it has real evidence: Proven (>=3 touches, >=65% reacted), Tested (>=2 touches, >=60%), or Footprint-only (not yet
 #                 tested but >=3 different evidence types agree; shown last and labelled). Ranked by reactions - 2*breaks + evidence + recency. Top 20.
 #   5 CHECK       walk-forward test: zones built only from earlier sessions are judged on the NEXT session and compared with the same zones shifted
@@ -17,7 +16,8 @@ import os, sys, datetime as dt
 import numpy as np, pandas as pd
 import nifty_levels as NL
 
-HALF = 15.0; MERGE = 25.0; REACT = float(os.environ.get('ZN_REACT', '15')); LOOK = 60; REARM = 30.0; TOP = 20; SHIFTS = (-120, -60, 60, 120)
+HALF = 15.0; MERGE = 25.0; REACT = float(os.environ.get('ZN_REACT', '30'));   # = band width, so a bounce and a full break are the same distance (50% baseline)
+LOOK = 60; REARM = 30.0; TOP = 20; SHIFTS = (-120, -60, 60, 120)
 SELFTEST = "--selftest" in sys.argv
 WT = {"HVN": 2, "weekPOC": 2, "weekVAH": 2, "weekVAL": 2, "buyStack": 1, "sellStack": 1, "absorb": 1, "swingHigh": 2, "swingLow": 2, "prevHigh": 1, "prevLow": 1, "monthPOC": 3, "dayHigh": 1, "dayLow": 1}
 
@@ -55,14 +55,18 @@ def candidates(B, L, upto, pre):
     return items, days
 
 def make_zones(items):
-    it = sorted(items); cl = []
-    for p, s in it:
-        if cl and p - cl[-1]["last"] <= MERGE: cl[-1]["m"].append((p, s)); cl[-1]["last"] = p
-        else: cl.append({"m": [(p, s)], "last": p})
-    zs = []
-    for c in cl:
-        w = [WT.get(s, 1) for _, s in c["m"]]; ctr = sum(p * x for (p, _), x in zip(c["m"], w)) / sum(w); src = sorted({s for _, s in c["m"]})
-        zs.append({"ctr": round(ctr, 1), "lo": round(ctr - HALF, 1), "hi": round(ctr + HALF, 1), "src": src, "n": len(src)})
+    """Density peaks, not chains: every candidate adds its weight to the +-HALF window around it; the heaviest windows become zones
+    (greedy, at least MERGE points apart). A chain-merge would fuse a dense month into 2-3 giant zones."""
+    if not items: return []
+    ps = np.array([p for p, _ in items], float); ws = np.array([WT.get(s_, 1) for _, s_ in items], float); sc = [s_ for _, s_ in items]
+    grid = np.arange(np.floor(ps.min() / 5) * 5, ps.max() + 5, 5.0); dens = np.array([ws[np.abs(ps - g) <= HALF].sum() for g in grid]); zs = []; taken = []
+    for gi in np.argsort(-dens, kind="stable"):
+        if dens[gi] < 3: break
+        g = grid[gi]
+        if any(abs(g - t) < MERGE for t in taken): continue
+        m = np.abs(ps - g) <= HALF; ctr = float((ps[m] * ws[m]).sum() / ws[m].sum()); src = sorted({sc[i] for i in np.where(m)[0]})
+        if len(src) < 2 and dens[gi] < 5: continue
+        taken.append(g); zs.append({"ctr": round(ctr, 1), "lo": round(ctr - HALF, 1), "hi": round(ctr + HALF, 1), "src": src, "n": len(src)})
     return zs
 
 # ───────────────────────────── proof: replay touches ─────────────────────────────
@@ -77,12 +81,10 @@ def touches(zlo, zhi, sess):
             elif armed and side:
                 res, mfe = None, 0.0
                 for j in range(i, min(n, i + LOOK)):
-                    if side == "above":
-                        dn = lo[j] <= zlo - REACT; up = hi[j] >= zhi + REACT; mfe = max(mfe, hi[j] - zhi)
-                    else:
-                        dn = lo[j] <= zlo - REACT; up = hi[j] >= zhi + REACT; mfe = max(mfe, zlo - lo[j])
-                    if side == "above": hit_react, hit_break = up, dn
-                    else: hit_react, hit_break = dn, up
+                    if side == "above":                                    # support test: bounce = REACT pts above the top edge; break = trades through the bottom edge
+                        mfe = max(mfe, hi[j] - zhi); hit_react, hit_break = hi[j] >= zhi + REACT, lo[j] <= zlo
+                    else:                                                  # resistance test: bounce = REACT pts below the bottom edge; break = trades through the top edge
+                        mfe = max(mfe, zlo - lo[j]); hit_react, hit_break = lo[j] <= zlo - REACT, hi[j] >= zhi
                     if hit_break: res = "break"; break          # same-bar ambiguity counts as a break (conservative)
                     if hit_react: res = "react"; break
                 out.append((d, side, res, mfe)); armed = False
