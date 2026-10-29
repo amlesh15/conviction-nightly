@@ -2,8 +2,8 @@
 # NIFTY LEVELS — support / resistance from Nifty FUTURES footprint data (price-level buy/sell volume), plus an honest test.
 #   Source: Dhan chart back-end getOrderFlow (1-minute footprint candles) for the nearest-expiry NIFTY future (contract looked up in the scrip master).
 #   Level sources (all from traded volume, not from price gaps):
-#     value area  POC / VAH / VAL  of: yesterday, last 5 sessions, last 20 sessions (70% value area)
-#     HVN         high-volume nodes of the 20-session profile (local volume peaks)
+#     value area  POC / VAH / VAL  of: yesterday, last 5 sessions, last month (22 sessions) (70% value area)
+#     HVN         high-volume nodes of the 1-month profile (local volume peaks)
 #     stacked     3+ adjacent price bins where one side dominates 3:1 (diagonal) inside a 30-minute block; buy stacks mark support, sell stacks resistance
 #     absorption  minutes with big volume and a lopsided delta where price barely moved
 #     yesterday's high and low
@@ -21,7 +21,8 @@ IST = "Asia/Kolkata"; U_OF = "https://ticks.dhan.co/orderflow/getOrderFlow"; MAS
 BIN = 5.0            # price bin, index points
 MERGE = 12.0         # sources closer than this become one level
 VA = 0.70
-W = {"prevPOC": 2, "prevVAH": 2, "prevVAL": 2, "5dPOC": 2, "5dVAH": 2, "5dVAL": 2, "20dPOC": 3, "20dVAH": 3, "20dVAL": 3, "HVN": 2, "buyStack": 1, "sellStack": 1, "absorb": 1, "prevHigh": 1, "prevLow": 1}
+W = {"prevPOC": 2, "prevVAH": 2, "prevVAL": 2, "5dPOC": 2, "5dVAH": 2, "5dVAL": 2, "1MPOC": 3, "1MVAH": 3, "1MVAL": 3, "HVN": 2, "buyStack": 1, "sellStack": 1, "absorb": 1, "prevHigh": 1, "prevLow": 1}
+MONTH = 22           # ~1 calendar month of sessions
 TRANSPORT = None; M_REACT = 10.0; LOOK = 30; CONTROL = (-80, -40, 40, 80)
 
 # ───────────────────────────── data ─────────────────────────────
@@ -136,11 +137,11 @@ def build_levels(B, L):
     if len(days) < 2: return [], None, days
     base = days[:-1]                                       # completed sessions; days[-1] is today (possibly partial) and is not used for levels
     ydate = base[-1]
-    for tag, ds in (("prev", [ydate]), ("5d", base[-5:]), ("20d", base[-20:])):
+    for tag, ds in (("prev", [ydate]), ("5d", base[-5:]), ("1M", base[-MONTH:])):
         va = value_area(profile(L[L["date"].isin(ds)]))
         if va:
             for nm, p in zip(("POC", "VAH", "VAL"), va): items.append((p, tag + nm, W[tag + nm]))
-    for p in hvns(profile(L[L["date"].isin(base[-20:])])): items.append((p, "HVN", W["HVN"]))
+    for p in hvns(profile(L[L["date"].isin(base[-MONTH:])])): items.append((p, "HVN", W["HVN"]))
     yb = B[B["date"] == ydate]; items += [(float(yb["hi"].max()), "prevHigh", 1), (float(yb["lo"].min()), "prevLow", 1)]
     recent = set(base[-5:])
     for d, side, p in stacks(L[L["date"].isin(recent)]): items.append((p, side + "Stack", W[side + "Stack"]))
@@ -167,7 +168,7 @@ def first_touch_outcome(hi, lo, L, m=M_REACT, look=LOOK):
 def level_test(B, L, top=6):
     days = sorted(B["date"].unique()); res = {"level": [0, 0], "control": [0, 0]}; per = []
     for k in range(5, len(days)):
-        d = days[k]; Lh = L[L["date"].isin(days[max(0, k - 20):k])]; Bh = B[B["date"].isin(days[max(0, k - 20):k])]
+        d = days[k]; Lh = L[L["date"].isin(days[max(0, k - MONTH):k])]; Bh = B[B["date"].isin(days[max(0, k - MONTH):k])]
         if Lh.empty: continue
         lv, last, _ = build_levels(pd.concat([Bh, B[B["date"] == d].head(1)]), Lh)       # one bar of day d marks "today"; levels use only earlier sessions
         lv = sorted(lv, key=lambda c: -c["strength"])[:top]; s = B[B["date"] == d]; hi = s["hi"].to_numpy(float); lo = s["lo"].to_numpy(float)
@@ -208,7 +209,7 @@ def report(levels, last, label, imb, imb_asof):
 
 def main():
     import live_refresh_local as LR
-    days = int(os.environ.get("NL_DAYS", "60")); sid, name, exp = nearest_future(); print("contract:", name, sid, exp)
+    days = int(os.environ.get("NL_DAYS", "45")); sid, name, exp = nearest_future(); print("contract:", name, sid, exp)
     cs = fetch(sid, days); B, L = to_frames(cs); print(len(cs), "candles;", B["date"].nunique(), "sessions;", B["date"].min(), "->", B["date"].max())
     last = float((B["hi"].iloc[-1] + B["lo"].iloc[-1]) / 2)
     dummy = pd.DataFrame([{"t": 0, "date": "9999-12-31", "mod": 555, "hi": last, "lo": last, "buy": 0, "sell": 0, "tot": 0}])      # marks "next session", so every completed session feeds the levels
@@ -216,6 +217,11 @@ def main():
     hdr, rows = report(levels, last, name, imb, asof)
     stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     sheet_put(sh, "Nifty Levels", hdr, rows + [[], ["contract", name, "last price (mid of last minute)", round(last, 1), "sessions used", len(ds), f"run {stamp}"]])
+    drows = []
+    for d in ds[-MONTH:]:
+        va = value_area(profile(L[L["date"] == d])); b = B[B["date"] == d]
+        if va: drows.append([d, round(float(b["hi"].max()), 1), round(float(b["lo"].min()), 1), round(va[0], 1), round(va[1], 1), round(va[2], 1), int(b["tot"].sum()), int((b["buy"] - b["sell"]).sum())])
+    sheet_put(sh, "Nifty Daily Profile", ["date", "high", "low", "POC", "VAH", "VAL", "volume", "net delta"], drows[::-1])
     t = level_test(B, L)
     note = [[], ["reading", "react % = share of first touches where price moved 10 pts back away before 10 pts through, within 30 minutes. If 'level' is not clearly above 'control' (same prices shifted +-40/80 pts), the levels add nothing beyond noise."],
             ["data", f"{len(ds)} sessions {ds[0]} -> {ds[-1]}; levels for each day built only from earlier sessions"]]
