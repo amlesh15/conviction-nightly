@@ -17,9 +17,9 @@ import os, sys, datetime as dt
 import numpy as np, pandas as pd
 import nifty_levels as NL
 
-HALF = 15.0; MERGE = 25.0; REACT = 25.0; LOOK = 60; REARM = 30.0; TOP = 20; SHIFTS = (-120, -60, 60, 120)
+HALF = 15.0; MERGE = 25.0; REACT = float(os.environ.get('ZN_REACT', '15')); LOOK = 60; REARM = 30.0; TOP = 20; SHIFTS = (-120, -60, 60, 120)
 SELFTEST = "--selftest" in sys.argv
-WT = {"HVN": 2, "weekPOC": 2, "weekVAH": 2, "weekVAL": 2, "buyStack": 1, "sellStack": 1, "absorb": 1, "swingHigh": 2, "swingLow": 2, "prevHigh": 1, "prevLow": 1, "monthPOC": 3}
+WT = {"HVN": 2, "weekPOC": 2, "weekVAH": 2, "weekVAL": 2, "buyStack": 1, "sellStack": 1, "absorb": 1, "swingHigh": 2, "swingLow": 2, "prevHigh": 1, "prevLow": 1, "monthPOC": 3, "dayHigh": 1, "dayLow": 1}
 
 # ───────────────────────────── candidates ─────────────────────────────
 def swings(B, n=3):
@@ -49,6 +49,8 @@ def candidates(B, L, upto, pre):
     items += [(p, s) for d, s, p in pre["swing"] if d in ok]
     items += [(p, s + "Stack") for d, s, p in pre["stack"] if d in ok]
     items += [(p, "absorb") for d, p in pre["absorb"] if d in ok]
+    for d in month:                                                     # every session's own high and low is a real turning point
+        b = B[B["date"] == d]; items += [(float(b["hi"].max()), "dayHigh"), (float(b["lo"].min()), "dayLow")]
     yb = B[B["date"] == days[-1]]; items += [(float(yb["hi"].max()), "prevHigh"), (float(yb["lo"].min()), "prevLow")]
     return items, days
 
@@ -100,28 +102,34 @@ def stats(z, sess, ndays):
     z.update({"touches": len(ts), "react": len(r), "brk": len(b), "rate": len(r) / len(ts) if ts else None, "bounce": float(np.mean([t[3] for t in r])) if r else 0.0,
               "role": role, "last_ok": recent[0], "score": 3 * len(r) - 2 * len(b) + z["n"] + bonus})
     t_, rate = len(ts), z["rate"]
-    z["tier"] = "Proven" if t_ >= 3 and rate >= .65 else ("Tested" if t_ >= 2 and rate >= .60 else ("Footprint-only" if t_ < 2 and z["n"] >= 3 else "Rejected"))
+    if t_ >= 3 and rate >= .65: z["tier"] = "Proven"
+    elif t_ >= 2 and rate >= .60: z["tier"] = "Tested"
+    elif t_ == 1 and rate == 1: z["tier"] = "Early (1 touch, held)"
+    elif t_ == 0 and z["n"] >= 2: z["tier"] = "Footprint-only"
+    else: z["tier"] = "Rejected"
     return z
 
 def top_zones(B, L, upto, pre, top=TOP):
     items, days = candidates(B, L, upto, pre)
     if not items: return [], days
     sess = sessions_of(B, days[-NL.MONTH:]); zs = [stats(z, sess, len(days)) for z in make_zones(items)]
-    order = {"Proven": 0, "Tested": 1, "Footprint-only": 2}
-    zs = [z for z in zs if z["tier"] != "Rejected"]; zs.sort(key=lambda z: (order[z["tier"]] if z["tier"] == "Footprint-only" else 0, -z["score"]))
+    order = {"Proven": 0, "Tested": 0, "Early (1 touch, held)": 1, "Footprint-only": 2}
+    zs = [z for z in zs if z["tier"] != "Rejected"]; zs.sort(key=lambda z: (order[z["tier"]], -z["score"]))
     return zs[:top], days
 
 # ───────────────────────────── walk-forward check ─────────────────────────────
 def walk_forward(B, L, pre, min_hist=8):
-    days = sorted(B["date"].unique()); tot = {"zones": [0, 0], "shifted": [0, 0]}; used = 0
+    days = sorted(B["date"].unique()); tot = {}; used = 0
     for k in range(min_hist, len(days)):
         zs, _ = top_zones(B, L, days[k], pre)
         if not zs: continue
         s = sessions_of(B, [days[k]]); used += 1
         for z in zs:
-            for name, off in [("zones", 0)] + [("shifted", o) for o in SHIFTS]:
-                for t in touches(z["lo"] + off, z["hi"] + off, s):
-                    if t[2]: tot[name][0 if t[2] == "react" else 1] += 1
+            grp = "proven/tested zones" if z["tier"] in ("Proven", "Tested") else "early/footprint-only zones"
+            for name, off in [(grp, 0), ("all zones shifted", None)]:
+                for o in ([0] if off == 0 else SHIFTS):
+                    for t in touches(z["lo"] + o, z["hi"] + o, s):
+                        if t[2]: tot.setdefault(name, [0, 0])[0 if t[2] == "react" else 1] += 1
     rows = [[n, r, b, round(100 * r / (r + b), 1) if r + b else ""] for n, (r, b) in tot.items()]
     return rows, used
 
@@ -133,6 +141,8 @@ def main():
     pre = {"swing": swings(B), "stack": NL.stacks(L), "absorb": NL.absorption(B)}
     last = float((B["hi"].iloc[-1] + B["lo"].iloc[-1]) / 2)
     zs, _ = top_zones(B, L, "9999-12-31", pre)
+    items, _d = candidates(B, L, "9999-12-31", pre); allz = [stats(z, sessions_of(B, _d[-NL.MONTH:]), len(_d)) for z in make_zones(items)]
+    diag = f"{len(items)} candidate prices -> {len(allz)} zones -> " + ", ".join(f"{k}: {sum(z['tier'] == k for z in allz)}" for k in ("Proven", "Tested", "Early (1 touch, held)", "Footprint-only", "Rejected"))
     rows = []
     for z in sorted(zs, key=lambda z: -z["ctr"]):
         rows.append([z["lo"], z["hi"], z["ctr"], "above price (resistance side)" if z["ctr"] > last else "below price (support side)", round((z["ctr"] / last - 1) * 100, 2), z["role"], z["tier"],
@@ -140,7 +150,7 @@ def main():
     hdr = ["zone from", "zone to", "centre", "where", "% from last", "acts as", "evidence", "touches", "reacted", "broke", "react %", "avg bounce pts", "last worked", "what it is made of"]
     sh = LR.open_sheet(); stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     NL.sheet_put(sh, "Nifty Zones", hdr, rows + [[], ["contract", name, "last price", round(last, 1), "sessions", len(ds), f"{ds[0]} -> {ds[-1]}", f"run {stamp}"],
-        ["how to read", f"Zone = ~{int(2*HALF)}-point band. A touch = price entering the band; REACTED = it moved {int(REACT)}+ pts back away within {LOOK} min before breaking {int(REACT)}+ pts through; BROKE = the opposite. 'Footprint-only' zones have no proven touches yet."]])
+        ["why this many", diag], ["how to read", f"Zone = ~{int(2*HALF)}-point band. A touch = price entering the band; REACTED = it moved {int(REACT)}+ pts back away within {LOOK} min before breaking {int(REACT)}+ pts through; BROKE = the opposite. 'Footprint-only' zones have no proven touches yet."]])
     wf, used = walk_forward(B, L, pre)
     NL.sheet_put(sh, "Nifty Zone Test", ["set", "reacted", "broke", "react %"], wf + [[], ["reading", f"Zones built ONLY from earlier sessions, judged on the next session ({used} sessions tested). 'shifted' = the same zones moved by {SHIFTS} points. If zones are not clearly above shifted, the map adds nothing beyond chance."]])
     print("tabs written"); [print(r) for r in rows]; print(wf)
