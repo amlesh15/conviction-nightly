@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: "Dates, comma separated (blank = 2026-10-28,29,30)"
+        description: "Dates, comma separated (blank = every session with real OI)"
         required: false
         default: ""
 
