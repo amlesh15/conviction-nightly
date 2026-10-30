@@ -9,7 +9,7 @@
 #                        (3) what does OI do at the strike right after the touch (writers add / leave)?
 #   Everything uses only data up to the touch for the 'cause' columns (no look-ahead); outcome uses the next 60 min.
 #   OUTPUT tabs: "Nifty OI Days" (one row per session), "Nifty OI Walls" (every strike observation), "Nifty OI Pattern" (the answers, with counts).
-#   Usage: python nifty_oi_days.py [--selftest]   env: NOI_DATES (default 2026-10-28,2026-10-29,2026-10-30), NOI_LO/NOI_HI (default 22300/23700)
+#   Usage: python nifty_oi_days.py [--selftest]   env: NOI_DATES (default = every session in the data with real OI), NOI_LO/NOI_HI (default 22300/23700)
 # ==================================================================================
 import os, sys, numpy as np, pandas as pd
 os.environ.setdefault("NOI_LO", "22300"); os.environ.setdefault("NOI_HI", "23700")
@@ -68,9 +68,17 @@ def summarize(O):
     return pd.DataFrame(rows), lines
 
 def main():
-    dates = [x.strip() for x in os.environ.get("NOI_DATES", "2026-10-28,2026-10-29,2026-10-30").split(",") if x.strip()]
+    dates = [x.strip() for x in (os.environ.get("NOI_DATES") or "").split(",") if x.strip()]
     panel, spot, latest, lot, e = N.pull()
     have = sorted(panel["session"].unique()); print("sessions in data:", have, "| expiry", e)
+    thin = {}
+    if not dates:       # default = every session in the data whose total OI at 09:45 is at least 30% of the biggest session (earlier sessions only saw this contract far from expiry)
+        tot = {}
+        for s in have:
+            try: D = N.Day(panel, spot, s); tot[s] = float(D.oi.iloc[D.pos(T0)].sum()) / L if len(D.idx) >= 100 else 0.0
+            except Exception: tot[s] = 0.0
+        mx = max(tot.values()) or 1.0; dates = [s for s in have if tot[s] >= 0.3 * mx]; thin = {s: round(tot[s], 0) for s in have if s not in dates}
+        print("total OI at 09:45 (lakh sh):", {s: round(v) for s, v in tot.items()}, "-> using", dates)
     obs, days, missing = [], [], []
     for s in dates:
         if s not in have: missing.append(s); continue
@@ -83,7 +91,7 @@ def main():
     from live_refresh_local import open_sheet
     import nifty_levels as NL
     sh = open_sheet(); n_t = int((O["touched"] == "yes").sum())
-    notes = [[f"expiry {e}; sessions {', '.join(DAYS['session'])}" + (f"; NOT AVAILABLE: {', '.join(missing)}" if missing else "")],
+    notes = [[f"expiry {e}; sessions {', '.join(DAYS['session'])}" + (f"; NOT AVAILABLE: {', '.join(missing)}" if missing else "") + (f"; left out (thin OI, contract far from expiry): {', '.join(thin)}" if thin else "")],
              [f"{len(O)} strike-levels examined, {n_t} touched after {T0}. HELD = price moved {MOVE} pts away before {MOVE} pts through, within {LOOK} min of the first touch (within {W} pts)."],
              ["Small sample: a difference of a few percentage points means nothing; look at the counts."]] + [[l] for l in lines]
     NL.sheet_put(sh, "Nifty OI Days", list(DAYS.columns), DAYS.values.tolist())
