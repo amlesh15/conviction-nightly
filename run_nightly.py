@@ -40,6 +40,14 @@ def _vol_mult3(md, days=3, win=20):
         recs.append({"symbol": sym, "Vol\u00d7": round(float(max(ratios)), 1)})
     return pd.DataFrame(recs)
 
+def _vwap_prices(md):
+    """Latest rolling 3- and 5-session VWAP PRICE per stock = sum(typical price x volume) / sum(volume) over the last W daily candles
+       (typical price = (high+low+close)/3). Rolls every session; never restarts. Same maths the engine uses for the slopes."""
+    import vwap_levels as VL
+    d = VL.vwap_frame(md); last = d.sort_values("date").groupby("symbol").tail(1)[["symbol", "vwap3", "vwap5"]].copy()
+    for c in ("vwap3", "vwap5"): last[c] = last[c].round(2)
+    return last
+
 def _deg(dash):
     """VWAP %/session slope -> angle in degrees."""
     for col in ("vwap3 slp", "vwap5 slp"):
@@ -55,7 +63,7 @@ def _order(dash):
     for c in LIVE_COLS:
         if c not in dash.columns: dash[c] = ""
     strip = [c for c in dash.columns if re.fullmatch(r"\d{2}-\d{2}", str(c))]
-    vw    = [c for c in ("vwap3 slp", "vwap5 slp") if c in dash.columns]
+    vw    = [c for c in ("vwap3", "vwap5") if c in dash.columns]   # rolling 3 / 5-session VWAP PRICES (the engine still scores on their slopes)
     sup   = sorted([c for c in dash.columns if re.fullmatch(r"imb_sup\d+", c)], key=lambda x: int(x[7:]))
     res   = sorted([c for c in dash.columns if re.fullmatch(r"imb_res\d+", c)], key=lambda x: int(x[7:]))
     mid   = [c for c in ("in_imb", "Vol\u00d7", "S/R Flag") if c in dash.columns]
@@ -67,7 +75,8 @@ def build_tables(G, md):
     rule_dash, rule_hist = G["build_rule_dashboard"](feat, months=3, last_n=5)
     ni = G["nearest_imbalances"](feat)
     dash = rule_dash.merge(ni, on="symbol", how="left").merge(_vol_mult3(md), on="symbol", how="left")
-    return feat, _order(_deg(dash)), rule_hist
+    dash = dash.drop(columns=[c for c in ("vwap3 slp", "vwap5 slp") if c in dash.columns]).merge(_vwap_prices(md), on="symbol", how="left")
+    return feat, _order(dash), rule_hist
 
 # ── Google Sheets ──
 import gspread
