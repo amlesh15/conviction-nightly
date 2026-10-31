@@ -52,6 +52,6 @@ jobs:
         id: pre
         if: inputs.mode != 'test'
         run: python preflight.py live
-      - name: EMA 9/26 cross alerts on ATM options
+      - name: Stock EMA 12/26 + VWAP alerts (ATM option)
         if: inputs.mode == 'test' || steps.pre.outputs.go == 'true'
         run: python ema_cross_alert.py ${{ inputs.mode || 'once' }}

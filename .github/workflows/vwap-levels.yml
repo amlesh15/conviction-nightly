@@ -1,0 +1,33 @@
+name: vwap-levels
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore NSE cache (same folder the nightly job uses)
+        uses: actions/cache@v4
+        with:
+          path: ~/fno_cache
+          key: vwap-fno-cache-${{ github.run_id }}
+          restore-keys: |
+            vwap-fno-cache-
+      - name: Self-test
+        run: python vwap_levels.py --selftest
+      - name: Rolling VWAP levels
+        run: python vwap_levels.py
