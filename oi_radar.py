@@ -172,7 +172,16 @@ def main():
     for r in rows[:10]: print(" | ".join(str(x) for x in r[:8]), "|", r[-1])
     sh = LR.open_sheet()
     def put(title, header, body):
-        vals = [header] + body
+        def clean(v):
+            try:
+                import math
+                if v is None: return ""
+                if hasattr(v, "item"): v = v.item()
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return ""
+                if hasattr(v, "isoformat"): return str(v)[:10]
+            except Exception: pass
+            return v
+        vals = [[clean(x) for x in r] for r in [header] + body]
         try: ws = sh.worksheet(title); ws.clear()
         except gspread.WorksheetNotFound: ws = sh.add_worksheet(title=title, rows=len(vals) + 20, cols=len(header) + 2)
         if ws.row_count < len(vals) + 5: ws.resize(rows=len(vals) + 20)
