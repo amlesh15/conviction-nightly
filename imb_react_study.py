@@ -32,6 +32,8 @@ def _hdr():
     ck = open(COOKIE_PATH).read().strip() if os.path.exists(COOKIE_PATH) else ""
     return {"cookie": ck, "content-type": "application/json", "origin": "https://web.sensibull.com", "referer": "https://web.sensibull.com/", "user-agent": "Mozilla/5.0"}
 
+STATUS = {}   # last HTTP status / reason per symbol (written to the summary tab so a failed run explains itself)
+
 def fetch_1m(sym, days=DAYS, tries=3):
     import requests
     end = dt.date.today()
@@ -40,15 +42,16 @@ def fetch_1m(sym, days=DAYS, tries=3):
         try:
             r = requests.post(CANDLE.format(sym=sym), json=body, headers=_hdr(), timeout=(8, 40))
             if r.status_code in (429, 502, 503, 504): time.sleep(1.5 * (k + 1)); continue
-            if r.status_code != 200: return None
+            STATUS[sym] = f"HTTP {r.status_code}"
+            if r.status_code != 200: STATUS[sym] += " " + r.text[:80].replace("\n", " "); return None
             c = ((r.json() or {}).get("payload") or {}).get("candles") or []
-            if not c: return None
+            if not c: STATUS[sym] += " no candles"; return None
             df = pd.DataFrame(c); ts = pd.to_datetime(df["ts"])
             if getattr(ts.dt, "tz", None) is not None: ts = ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
             df["ts"] = ts
             for col in ("open", "high", "low", "close", "volume"): df[col] = pd.to_numeric(df[col], errors="coerce")
             return df.sort_values("ts").reset_index(drop=True)
-        except Exception: time.sleep(1.0 * (k + 1))
+        except Exception as ex_: STATUS[sym] = "error " + str(ex_)[:80]; time.sleep(1.0 * (k + 1))
     return None
 
 def to_15m(df):
@@ -200,7 +203,11 @@ def main():
             if (i + 1) % 25 == 0: print(f"  {i + 1}/{len(syms)} done, {len(EV)} events so far")
     print(f"events {len(EV)}, no intraday data for {len(nodata)} symbols: {nodata[:20]}")
     head, rows = summarise(EV, BASE)
-    for r_ in rows[:40]: print(" | ".join(str(x) for x in r_))
+    from collections import Counter
+    notes = [[], ["RUN NOTES"], ["symbols asked", len(syms)], ["symbols with intraday data", len(syms) - len(nodata)], ["symbols with NO intraday data", len(nodata)], ["events found", len(EV)], ["15-min baseline bars", len(BASE)], ["daily data through", latest]]
+    for k_, v_ in Counter(STATUS.get(x, "?") for x in nodata).most_common(5): notes.append(["no-data reason", k_, v_])
+    rows = rows + notes
+    for r_ in rows[:60]: print(" | ".join(str(x) for x in r_))
     sh = LR.open_sheet()
     def put(title, header, body):
         vals = [header] + body
