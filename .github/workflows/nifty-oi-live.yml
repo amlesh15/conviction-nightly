@@ -1,0 +1,43 @@
+name: nifty-oi-live
+
+# Feeds the live OI dashboard. Runs by itself on weekdays (09:15 IST, and again at 14:30 IST so the last hour is covered, because GitHub stops any job at 6 hours).
+# You can also run it by hand: leave "date" blank for today, or type a past session (YYYY-MM-DD) to load that day once for replay.
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Session date YYYY-MM-DD (blank = today, keeps refreshing every 5 min)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "45 3 * * 1-5"
+    - cron: "0 9 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nifty-oi-live
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      OI_SHEET_ID: ${{ secrets.OI_SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+      NOI_DATE: ${{ github.event.inputs.date }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python setup_env.py
+      - name: Self-test
+        run: python nifty_oi_live.py --selftest
+      - name: Live OI feed
+        run: python nifty_oi_live.py
