@@ -14,20 +14,21 @@ import numpy as np, pandas as pd
 SELFTEST = "--selftest" in sys.argv
 import nifty_oi_day as N          # reuses the Sensibull helpers (candles, chain, Day) unchanged
 SPAN = int(os.environ.get("OI_SPAN", "800")); EVERY = int(os.environ.get("OI_EVERY", "300")); STOP = os.environ.get("OI_STOP", "15:40")
-HDR = ["session", "expiry", "lot", "updated", "time", "spot", "strike", "ce_oi", "pe_oi", "ce_px", "pe_px"]
+HDR = ["session", "expiry", "lot", "updated", "time", "spot", "strike", "ce_oi", "pe_oi", "ce_px", "pe_px", "prev_close"]
 
 def ist_now(): return pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
 
-def snapshots(D, lot, expiry, updated, step=5):
+def snapshots(D, lot, expiry, updated, step=5, prev_close=""):
     """5-minute snapshots of the whole session so far -> list of rows (HDR order)."""
     marks = [D.pos("09:15")]; last = len(D.idx) - 1
     first = D.idx[0]; start = first.hour * 60 + first.minute
     m = (start // step + 1) * step
-    while True:
+    while m <= 15 * 60 + 30:                                                   # nothing after the 15:30 close (late prints are not trading)
         ts = pd.Timestamp(f"{D.session} {m // 60:02d}:{m % 60:02d}")
         if ts > D.idx[-1]: break
         marks.append(D.pos(f"{m // 60:02d}:{m % 60:02d}")); m += step
-    if marks[-1] != last: marks.append(last)                                   # always include the newest minute
+    lastok = D.pos("15:30"); last = min(last, lastok)
+    if marks[-1] != last: marks.append(last)                                   # always include the newest minute (never later than 15:30)
     seen, rows = set(), []
     for i in marks:
         if i in seen: continue
@@ -35,11 +36,11 @@ def snapshots(D, lot, expiry, updated, step=5):
         for k in D.strikes:
             ce = float(D.oi[("CE", k)].iloc[i]) if ("CE", k) in D.oi.columns else 0.0; pe = float(D.oi[("PE", k)].iloc[i]) if ("PE", k) in D.oi.columns else 0.0
             cp = D.px[("CE", k)].iloc[i] if ("CE", k) in D.px.columns else np.nan; pp = D.px[("PE", k)].iloc[i] if ("PE", k) in D.px.columns else np.nan
-            rows.append([D.session, expiry, lot, updated, hm, sp, k, int(ce), int(pe), "" if cp != cp else round(float(cp), 2), "" if pp != pp else round(float(pp), 2)])
+            rows.append([D.session, expiry, lot, updated, hm, sp, k, int(ce), int(pe), "" if cp != cp else round(float(cp), 2), "" if pp != pp else round(float(pp), 2), prev_close])
     return rows
 
 def one_pass(session, want_expiry):
-    spot = N.candles("NIFTY", days=5)
+    spot = N.candles("NIFTY", days=45 if session else 5)
     if spot is None: raise SystemExit("no NIFTY spot candles (cookie expired?)")
     sess = session or spot["session"].max()
     s = spot[spot["session"] == sess]
@@ -56,7 +57,8 @@ def one_pass(session, want_expiry):
     panel = pd.concat(frames, ignore_index=True)
     if not (panel["session"] == sess).any(): print(f"no option candles for {sess}"); return None
     D = N.Day(panel, spot, sess)
-    return snapshots(D, lot, e, ist_now().strftime("%Y-%m-%d %H:%M"), 5), sess, e, len(syms)
+    pv = spot[spot["session"] < sess]; prev = round(float(pv["close"].iloc[-1]), 2) if len(pv) else ""
+    return snapshots(D, lot, e, ist_now().strftime("%Y-%m-%d %H:%M"), 5, prev), sess, e, len(syms)
 
 def write(rows):
     import gspread, json
