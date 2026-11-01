@@ -1,0 +1,52 @@
+name: oi-radar
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First session to include (YYYY-MM-DD)"
+        required: false
+        default: "2026-10-21"
+      month:
+        description: "Expiry month to watch (YYYY-MM)"
+        required: false
+        default: "2026-11"
+      telegram:
+        description: "Send the top flags to Telegram? (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      EMA_TELEGRAM_TOKEN: ${{ secrets.EMA_TELEGRAM_TOKEN }}
+      EMA_TELEGRAM_CHAT_ID: ${{ secrets.EMA_TELEGRAM_CHAT_ID }}
+      RADAR_START: ${{ github.event.inputs.start }}
+      RADAR_MONTH: ${{ github.event.inputs.month }}
+      RADAR_TELEGRAM: ${{ github.event.inputs.telegram }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore NSE cache (same folder the nightly job uses)
+        uses: actions/cache@v4
+        with:
+          path: ~/fno_cache
+          key: oi-radar-cache-${{ github.run_id }}
+          restore-keys: |
+            vwap-fno-cache-
+            oi-radar-cache-
+      - name: Self-test
+        run: python oi_radar.py --selftest
+      - name: OI Radar
+        run: python oi_radar.py
