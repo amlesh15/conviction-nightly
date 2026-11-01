@@ -23,7 +23,7 @@ import numpy as np, pandas as pd
 SELFTEST = "--selftest" in sys.argv
 COOKIE_PATH = os.path.expanduser("~/live-refresh/cookie.txt")
 CANDLE = "https://oxide.sensibull.com/v1/compute/1/candles/{sym}"
-DAYS = int(os.environ.get("IR_DAYS", "60")); TOLF = float(os.environ.get("IR_TOL", "0.10")); BRKF = float(os.environ.get("IR_BRK", "0.12"))
+DAYS = int(os.environ.get("IR_DAYS", "56")); TOLF = float(os.environ.get("IR_TOL", "0.10")); BRKF = float(os.environ.get("IR_BRK", "0.12"))
 RACEF = 0.5          # race target / stop = 0.5 x daily range
 LAST_ENTRY = 22      # confirming bar must be 15:00 or earlier (bar 22) so there is room to measure
 
@@ -37,12 +37,13 @@ STATUS = {}   # last HTTP status / reason per symbol (written to the summary tab
 def fetch_1m(sym, days=DAYS, tries=3):
     import requests
     end = dt.date.today()
-    body = {"from_date": (end - dt.timedelta(days=days)).isoformat(), "to_date": (end + dt.timedelta(days=1)).isoformat(), "interval": "1M", "skip_last_ts": False}
-    for k in range(tries):
+    for k in range(tries + 2):
+        body = {"from_date": (end - dt.timedelta(days=days)).isoformat(), "to_date": (end + dt.timedelta(days=1)).isoformat(), "interval": "1M", "skip_last_ts": False}
         try:
             r = requests.post(CANDLE.format(sym=sym), json=body, headers=_hdr(), timeout=(8, 40))
             if r.status_code in (429, 502, 503, 504): time.sleep(1.5 * (k + 1)); continue
             STATUS[sym] = f"HTTP {r.status_code}"
+            if r.status_code == 400 and "exceeds limit" in r.text and days > 20: days -= 4; continue     # server counts the range inclusively; shrink and retry
             if r.status_code != 200: STATUS[sym] += " " + r.text[:80].replace("\n", " "); return None
             c = ((r.json() or {}).get("payload") or {}).get("candles") or []
             if not c: STATUS[sym] += " no candles"; return None
