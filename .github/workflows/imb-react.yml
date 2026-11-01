@@ -1,0 +1,36 @@
+name: imb-react-study
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      SENSIBULL_COOKIE: ${{ secrets.SENSIBULL_COOKIE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python setup_env.py
+      - name: Restore NSE cache (same folder the nightly job uses)
+        uses: actions/cache@v4
+        with:
+          path: ~/fno_cache
+          key: imb-react-cache-${{ github.run_id }}
+          restore-keys: |
+            vwap-fno-cache-
+            imb-react-cache-
+      - name: Self-test
+        run: python imb_react_study.py --selftest
+      - name: Imbalance reaction study
+        run: python imb_react_study.py
