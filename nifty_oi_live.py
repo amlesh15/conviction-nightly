@@ -12,6 +12,7 @@ import os, sys, time, datetime as dt
 import numpy as np, pandas as pd
 
 SELFTEST = "--selftest" in sys.argv
+import functools; print = functools.partial(print, flush=True)     # show every line in the Actions log at once
 import nifty_oi_day as N          # reuses the Sensibull helpers (candles, chain, Day) unchanged
 SPAN = int(os.environ.get("OI_SPAN", "800")); EVERY = int(os.environ.get("OI_EVERY", "300")); STOP = os.environ.get("OI_STOP", "15:40")
 HDR = ["session", "expiry", "lot", "updated", "time", "spot", "strike", "ce_oi", "pe_oi", "ce_px", "pe_px", "prev_close"]
@@ -47,13 +48,21 @@ def one_pass(session, want_expiry):
     if s.empty: print(f"no spot candles for {sess} yet"); return None
     px = float(s["close"].iloc[-1]); c = round(px / 50) * 50; N.LO, N.HI = c - SPAN, c + SPAN
     e, lot, syms, _ = N.chain(sess, want_expiry)
-    import concurrent.futures as cf
-    frames = []
-    with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        for (t, k), df in zip(syms.keys(), ex.map(lambda s_: N.candles(s_, days=4), syms.values())):
-            if df is None: continue
+    import concurrent.futures as cf, random
+    def fetch(s_):                                   # one contract failing must not kill the whole pass
+        for a in range(3):
+            try: return N.candles(s_, days=4)
+            except Exception as ex_: err = repr(ex_)[:90]; time.sleep(2 + 3 * a + random.random())
+        print("  contract failed:", s_, err); return "ERR"
+    frames = []; failed = 0
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        for (t, k), df in zip(syms.keys(), ex.map(fetch, syms.values())):
+            if isinstance(df, str): failed += 1; continue
+            if df is None: continue                     # no trades in that contract: normal for far strikes
             d = df[["ts", "session", "close", "volume", "oi"]].copy(); d["strike"] = k; d["typ"] = t; frames.append(d)
+    print(f"  {len(frames)} of {len(syms)} contracts fetched ({failed} missing)")
     if not frames: raise SystemExit("no option candles returned (cookie expired?)")
+    if failed > 0.2 * len(syms): print("  too many contracts missing - keeping the previous sheet, will retry next round"); return None
     panel = pd.concat(frames, ignore_index=True)
     if not (panel["session"] == sess).any(): print(f"no option candles for {sess}"); return None
     D = N.Day(panel, spot, sess)
@@ -74,15 +83,17 @@ def main():
     session = os.environ.get("NOI_DATE") or None; want = os.environ.get("NOI_EXPIRY") or None
     today = ist_now().strftime("%Y-%m-%d"); live = (session in (None, today))
     h, m = (int(x) for x in STOP.split(":")); n = 0; t0 = time.time(); maxmin = int(os.environ.get("OI_MAXMIN", "340"))   # GitHub stops a job at 6 h; end cleanly before that
+    print(f"start {ist_now():%Y-%m-%d %H:%M:%S} IST, session={session or 'today'}, live={live}")
     while True:
+        t1 = time.time()
         try:
             out = one_pass(session, want)
             if out:
                 rows, sess, e, nc = out; write(rows); n += 1
                 print(f"{ist_now():%H:%M:%S} wrote {len(rows)} rows: session {sess}, expiry {e}, {nc} contracts, last snapshot {rows[-1][4]}", flush=True)
-        except SystemExit as ex_: print("stop:", ex_); 
+        except SystemExit as ex_: print("stop:", ex_)
         except Exception as ex_: print("pass failed:", repr(ex_)[:300], flush=True)
-        now = ist_now()
+        now = ist_now(); print(f"{now:%H:%M:%S} pass took {time.time()-t1:.0f}s")
         if not live or (now.hour, now.minute) >= (h, m) or (time.time() - t0) / 60 > maxmin: break
         if (now.hour, now.minute) < (9, 10): time.sleep(60); continue
         time.sleep(EVERY)
