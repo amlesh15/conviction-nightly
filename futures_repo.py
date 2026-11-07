@@ -79,14 +79,24 @@ def url_legacy(D):
 def url_cash(D):
     t = pd.Timestamp(D); return f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{t.strftime('%d%m%Y')}.csv"
 
+def url_cash_old(D):
+    t = pd.Timestamp(D); return f"https://nsearchives.nseindia.com/content/historical/EQUITIES/{t.year}/{t.strftime('%b').upper()}/cm{t.strftime('%d%b%Y').upper()}bhav.csv.zip"
+
+def parse_cash(c, close_col):
+    c = c.copy(); c.columns = [x.strip() for x in c.columns]; c = c[c["SERIES"].astype(str).str.strip() == "EQ"]
+    return pd.Series(_num(c[close_col]).values, index=c["SYMBOL"].astype(str).str.strip().values).groupby(level=0).last()
+
 def spot_for(sess, D):
+    """spot (cash close) per symbol: NSE's full cash file, else (before it existed, 2019) the older cm bhavcopy zip."""
     try:
         b = _get(sess, url_cash(D), tries=2)
-        if b is None: return None
-        c = pd.read_csv(io.StringIO(b.decode("utf-8", "ignore"))); c.columns = [x.strip() for x in c.columns]
-        c = c[c["SERIES"].astype(str).str.strip() == "EQ"]
-        return pd.Series(_num(c["CLOSE_PRICE"]).values, index=c["SYMBOL"].astype(str).str.strip().values).groupby(level=0).last()
-    except Exception: return None
+        if b is not None: return parse_cash(pd.read_csv(io.StringIO(b.decode("utf-8", "ignore"))), "CLOSE_PRICE")
+    except Exception: pass
+    try:
+        b = _get(sess, url_cash_old(D), tries=2)
+        if b is not None: return parse_cash(_zip_csv(b), "CLOSE")
+    except Exception: pass
+    return None
 
 def fetch_day(sess, D):
     """-> (DataFrame | None). None = NSE has no file that day. Raises Blocked if NSE refuses."""
@@ -182,6 +192,14 @@ def main():
     start = os.environ.get("FUT_START", "2019-01-01"); end = os.environ.get("FUT_END") or pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).strftime("%Y-%m-%d")
     budget = float(os.environ.get("FUT_MAX_MIN", "330")) * 60; t0 = time.time(); m = load_manifest(); sess = requests.Session(); ensure_readme()
     todo = [D for D in weekdays(start, end) if D not in m or (m[D].get("status") == "none" and D >= (pd.Timestamp(end) - pd.Timedelta(days=3)).strftime("%Y-%m-%d"))]
+    if os.environ.get("FUT_REPAIR", "") in ("1", "true"):
+        fix = []
+        for D, v in sorted(m.items()):
+            if v.get("status") != "ok" or D < start or D > end: continue
+            try: n = pd.read_parquet(day_path(D), columns=["underlying", "exp_rank"])
+            except Exception: continue
+            if n[n.exp_rank == 1].underlying.isna().mean() > 0.3: fix.append(D)
+        todo = sorted(set(todo) | set(fix)); print(f"repair mode: {len(fix)} stored days have no spot price and will be re-fetched")
     print(f"{len(todo)} days to fetch between {start} and {end} ({len(m)} already in the manifest)")
     ok = none = 0; consec = 0
     for i, D in enumerate(todo):
@@ -229,6 +247,8 @@ def selftest():
         "OPEN_INT": [50000, 10000, 1, 1], "CHG_IN_OI": [100, 50, 1, 1], "TIMESTAMP": ["15-MAR-2023"] * 4})
     d2 = finish(parse_legacy(l, "2023-03-15", pd.Series({"A": 101.5})), "2023-03-15")
     assert len(d2) == 2 and list(d2.exp_rank) == [1, 2] and list(d2.dte) == [15, 43] and abs(d2.iloc[0].turnover_cr - 2.55) < 1e-9 and d2.iloc[0].underlying == 101.5, d2
+    cm = pd.DataFrame({"SYMBOL": ["A", "B", "A"], "SERIES": ["EQ", "EQ", "BE"], "CLOSE": [101.5, 50.5, 9.0]})
+    assert parse_cash(cm, "CLOSE").to_dict() == {"A": 101.5, "B": 50.5} and url_cash_old("2019-03-15").endswith("/EQUITIES/2019/MAR/cm15MAR2019bhav.csv.zip")
     assert url_legacy("2023-03-15").endswith("/2023/MAR/fo15MAR2023bhav.csv.zip") and url_udiff("2026-11-06").endswith("20261106_F_0000.csv.zip")
     # storage round trip, views
     global ROOT, DAYS, MANIFEST
