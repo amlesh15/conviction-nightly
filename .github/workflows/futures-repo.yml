@@ -13,6 +13,10 @@ on:
         description: "Last date (blank = today)"
         required: false
         default: ""
+      repair:
+        description: "Re-fetch stored days that have no spot price (the 2019 days)? (true/false)"
+        required: false
+        default: "false"
       sheet:
         description: "Also write the 'Futures Roll' tab (latest day)? (true/false)"
         required: false
@@ -48,6 +52,7 @@ jobs:
           FUT_END: ${{ github.event.inputs.end }}
           FUT_SHEET: ${{ github.event.inputs.sheet || 'true' }}
           FUT_MAX_MIN: "330"
+          FUT_REPAIR: ${{ github.event.inputs.repair }}
           PYTHONUNBUFFERED: "1"
         run: python futures_repo.py
       - name: Commit new data files
