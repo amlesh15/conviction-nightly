@@ -12,6 +12,7 @@
 # ==================================================================================
 import os, io, sys, json, time, zipfile, datetime as dt
 import numpy as np, pandas as pd
+import functools; print = functools.partial(print, flush=True)     # show every line in the Actions log as it happens
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "data", "futures"); DAYS = os.path.join(ROOT, "by_day"); MANIFEST = os.path.join(ROOT, "manifest.json")
@@ -148,7 +149,9 @@ def checks(df):
     L = []; per = df.groupby("date").agg(n=("symbol", "nunique"), r=("symbol", "size"))
     L.append(f"{df.date.nunique()} sessions {df.date.min()} .. {df.date.max()} | {df.symbol.nunique()} distinct stocks | {len(df):,} contract-days")
     L.append(f"stocks per day: min {per.n.min()} (on {per.n.idxmin()}), median {int(per.n.median())}, max {per.n.max()}")
-    bad = df[(df.close > df.high * 1.0001) | (df.close < df.low * 0.9999)]; L.append(f"close outside the day's high/low: {len(bad)} rows" + (f" e.g. {bad.iloc[0].symbol} {bad.iloc[0].date}" if len(bad) else ""))
+    nt = df[df.contracts > 0]; bad = nt[(nt.close > nt.high * 1.0001) | (nt.close < nt.low * 0.9999)]
+    L.append(f"contracts that did not trade (open/high/low are 0, value it with 'settle'): {int((df.contracts == 0).sum()):,} rows = {(df.contracts == 0).mean() * 100:.0f}% (mostly far-month)")
+    L.append(f"traded contracts with close outside the day's high/low: {len(bad)} of {len(nt):,} rows" + (f" e.g. {bad.iloc[0].symbol} {bad.iloc[0].date}" if len(bad) else ""))
     z = df[(df.close <= 0) | df.close.isna()]; L.append(f"zero / missing close: {len(z)} rows (a contract with no trade that day keeps its settlement price in 'settle')")
     zz = df[(df.exp_rank == 1) & ((df.oi <= 0) | df.oi.isna())]; L.append(f"nearest-expiry rows with no open interest: {len(zz)}")
     # unit check at the legacy/new boundary: the two formats must report OI in the same unit (median ratio of consecutive days' OI should be ~1, not ~lot size)
@@ -160,10 +163,10 @@ def checks(df):
 
 # ───────────────────────────── run ─────────────────────────────
 def weekdays(a, b):
+    """every calendar day: NSE sometimes trades on a Saturday/Sunday (budget day, live-trading drills); weekends with no file are simply recorded as 'none'."""
     d = pd.Timestamp(a); e = pd.Timestamp(b)
     while d <= e:
-        if d.weekday() < 5: yield d.strftime("%Y-%m-%d")
-        d += pd.Timedelta(days=1)
+        yield d.strftime("%Y-%m-%d"); d += pd.Timedelta(days=1)
 
 def ensure_readme():
     p = os.path.join(ROOT, "README.md")
@@ -171,6 +174,7 @@ def ensure_readme():
         os.makedirs(ROOT, exist_ok=True)
         open(p, "w").write("# Stock futures repository\n\nEvery NSE stock-futures contract (all listed expiries) per trading day, raw (not corporate-action adjusted). One parquet file per day under `by_day/`.\n"
             "Columns: " + ", ".join(COLS) + ".\n\n`exp_rank` 1 = nearest listed expiry that day, 2 = next, 3 = far. `oi`, `oi_chg` are in units (shares); `contracts` = number of contracts; `turnover_cr` in rupees crore.\n"
+            "A contract that did not trade has open/high/low = 0; use `settle` to value it. Lot sizes change over time, so convert OI to lots with each row's own `lot`. The 2024-11-01 Diwali muhurat session is a one-hour session.\n"
             "`manifest.json` lists every date tried: `ok` (file stored) or `none` (NSE has no file that day, e.g. holiday). Read back with `futures_repo.load()`.\n")
 
 def main():
@@ -178,7 +182,7 @@ def main():
     start = os.environ.get("FUT_START", "2019-01-01"); end = os.environ.get("FUT_END") or pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).strftime("%Y-%m-%d")
     budget = float(os.environ.get("FUT_MAX_MIN", "330")) * 60; t0 = time.time(); m = load_manifest(); sess = requests.Session(); ensure_readme()
     todo = [D for D in weekdays(start, end) if D not in m or (m[D].get("status") == "none" and D >= (pd.Timestamp(end) - pd.Timedelta(days=3)).strftime("%Y-%m-%d"))]
-    print(f"{len(todo)} weekdays to fetch between {start} and {end} ({len(m)} already in the manifest)")
+    print(f"{len(todo)} days to fetch between {start} and {end} ({len(m)} already in the manifest)")
     ok = none = 0; consec = 0
     for i, D in enumerate(todo):
         if time.time() - t0 > budget: print(f"time budget reached after {i} days - run again to continue"); break
@@ -236,7 +240,7 @@ def selftest():
         rv = roll_view(al, "2026-11-06"); r = rv[rv.symbol == "A"].iloc[0]
         assert abs(r["rollover %"] - 16.7) < 0.05 and r["next expiry"] == "2026-12-29" and abs(r["basis %"] - ((102 - 101.5) / 101.5 * 100)) < 0.001, r
         ac = active_contract(d.assign(dte=np.where(d.exp_rank == 1, 2, d.dte)), roll_days=3); assert ac[ac.symbol == "A"].iloc[0].expiry == "2026-12-29"
-        assert len(list(weekdays("2026-11-02", "2026-11-08"))) == 5
+        assert len(list(weekdays("2026-11-02", "2026-11-08"))) == 7
         print("\n".join(checks(al)[:3]))
     finally: shutil.rmtree(tmp)
     print("SELFTEST OK - both NSE formats parse (stock futures only, all expiries ranked), URLs, storage, roll view, active-contract rule")
