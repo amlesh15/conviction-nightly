@@ -1,0 +1,60 @@
+name: futures-repo
+
+# Builds / updates the stock-futures repository (data/futures/) from NSE's daily F&O file and commits the new files back to the repo.
+# First run: set start (e.g. 2024-06-01) to prove it works, then run again with an earlier start (2019-01-01) to backfill. Safe to re-run: finished days are skipped.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First date to fetch (YYYY-MM-DD)"
+        required: false
+        default: "2024-06-01"
+      end:
+        description: "Last date (blank = today)"
+        required: false
+        default: ""
+      sheet:
+        description: "Also write the 'Futures Roll' tab (latest day)? (true/false)"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "30 15 * * 1-5"      # 21:00 IST, after NSE has published the day's file
+
+permissions:
+  contents: write
+
+concurrency:
+  group: futures-repo
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Self-test
+        run: python futures_repo.py --selftest
+      - name: Fetch NSE files
+        env:
+          GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          FUT_START: ${{ github.event.inputs.start || '2026-10-01' }}
+          FUT_END: ${{ github.event.inputs.end }}
+          FUT_SHEET: ${{ github.event.inputs.sheet || 'true' }}
+          FUT_MAX_MIN: "330"
+        run: python futures_repo.py
+      - name: Commit new data files
+        run: |
+          git config user.name "futures-repo bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/futures
+          if git diff --cached --quiet; then echo "nothing new to commit"; exit 0; fi
+          git commit -m "futures repository: update $(date -u +%F)"
+          for i in 1 2 3; do git pull --rebase -q && git push && exit 0; sleep 5; done
+          exit 1
