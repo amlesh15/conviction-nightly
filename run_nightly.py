@@ -17,7 +17,34 @@ def load_engine():
     for f in ("conviction_engine.py", "fvg_lab.py"):
         exec(compile(open(os.path.join(HERE, f)).read(), f, "exec"), G)
     os.makedirs(CACHE_DIR, exist_ok=True); G["CACHE"] = CACHE_DIR
+    patch_sessions(G)
     return G
+
+# ── include weekend / special sessions (Diwali muhurat, Saturday specials) and self-heal missed sessions ──
+# The engine only looked at Mon-Fri, so a Sunday muhurat session (e.g. 8-Nov-2026) was never loaded and the next day's
+# % change was measured against Friday's close. NSE only publishes a bhavcopy for days that actually traded, so scanning
+# every calendar day is safe (no file => skipped). conviction_engine.py itself is untouched; we swap two helpers at load.
+RESCAN_DAYS = 14   # also re-check this many days before the cached last date, to fill any session a transient download failure skipped
+
+def patch_sessions(G):
+    def _days(start, end):
+        out = []; d = pd.to_datetime(start); e = pd.to_datetime(end)
+        while d <= e:
+            ds = d.strftime("%Y-%m-%d")
+            if G["get_cash_bhav"](ds) is not None: out.append(ds)
+            d += pd.Timedelta(days=1)
+        return out
+    def trading_days(seed, end): return _days(seed, end)
+    def _weekdays_after(last, end):
+        have = set()
+        try:
+            import pandas as _pd
+            raw = _pd.read_parquet(os.path.join(G["CACHE"], "md_raw.parquet"), columns=["date"])
+            have = {str(x)[:10] for x in raw["date"].unique()}
+        except Exception: pass
+        start = pd.to_datetime(last) - pd.Timedelta(days=RESCAN_DAYS)
+        return [x for x in _days(start, end) if x not in have]
+    G["trading_days"] = trading_days; G["_weekdays_after"] = _weekdays_after
 
 def seed_cache():
     """If the cache is empty, start from seed/md_raw.parquet + seed/md_members.json (committed in the repo)."""
