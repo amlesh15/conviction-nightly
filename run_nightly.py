@@ -26,13 +26,24 @@ def seed_cache():
         if not os.path.exists(dst) and os.path.exists(src):
             os.makedirs(CACHE_DIR, exist_ok=True); shutil.copy(src, dst); print("seeded", fn)
 
-# ── trend snapshot columns (Chg% T..T-2, >SMMA7, SMMA7 slope + change, Dist20 T..T-2) ──
-# SMMA7 = Wilder smoothed MA seeded with a 7-day SMA; Dist20 = close / 20-day SMA - 1 (%); slope chg = today slope - yesterday slope (pp)
-TREND_COLS = ["Chg% T", "Chg% T-1", "Chg% T-2", ">SMMA7", "SMMA7", "SMMA7 slp%", "Slp chg (pp)",
-              "Dist20 T", "Dist20 T-1", "Dist20 T-2"]
+# ── trend snapshot columns ──────────────────────────────────────────────────────────────────────
+# Day logic: the 3 days are the LAST THREE TRADING SESSIONS in the data (newest first), and each column header carries the
+# real date, e.g. "Chg% 09-Nov | Chg% 06-Nov | Chg% 05-Nov". Run on Monday evening after the bhavcopy is out =>
+# today (Mon), the previous session (Fri), the session before (Thu). Weekends/holidays are skipped. If today's bhavcopy is not
+# published yet, the newest header shows the last session that exists (and Run Info shows the same date), so it never mislabels.
+# Chg% = close / previous session's close - 1 (previous = the actual previous market session, not the previous row of that stock).
+# SMMA7 = Wilder smoothed MA seeded with a 7-day SMA; Dist20 = close / 20-day SMA - 1 (%);
+# slope = SMMA7 today vs yesterday (%); slope chg = today's slope - yesterday's slope (percentage points).
 SMMA_N, MA_N = 7, 20
+FIXED_TREND = [">SMMA7", "SMMA7", "SMMA7 slp%", "Slp chg (pp)"]
 
-def _smma(v, n):
+def _is_chg(c): return str(c).startswith("Chg% ")
+def _is_dist(c): return str(c).startswith("Dist20 ")
+def _trend_cols_in(dash):
+    return ([c for c in dash.columns if _is_chg(c)] + FIXED_TREND[:1] + FIXED_TREND[1:] +
+            [c for c in dash.columns if _is_dist(c)])
+
+def _smma_arr(v, n):
     o = np.full(len(v), np.nan)
     if len(v) < n: return o
     o[n - 1] = v[:n].mean()
@@ -40,23 +51,28 @@ def _smma(v, n):
     return o
 
 def trend_frame(md):
-    recs = []
-    for sym, g in md.sort_values(["symbol", "date"]).groupby("symbol"):
-        c = pd.to_numeric(g["close"], errors="coerce").to_numpy(float)
-        c = c[~np.isnan(c)]
-        rec = {"symbol": sym}
-        if len(c) < MA_N + 2:
-            recs.append(rec); continue
-        ch = (c[1:] / c[:-1] - 1) * 100
-        sm = _smma(c, SMMA_N); slp = (sm[1:] / sm[:-1] - 1) * 100
-        ma = pd.Series(c).rolling(MA_N).mean().to_numpy(); dist = (c / ma - 1) * 100
-        r = lambda x, k=2: None if not np.isfinite(x) else round(float(x), k)
-        rec.update({"Chg% T": r(ch[-1]), "Chg% T-1": r(ch[-2]), "Chg% T-2": r(ch[-3]),
-                    ">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7": r(sm[-1]),
-                    "SMMA7 slp%": r(slp[-1], 3), "Slp chg (pp)": r(slp[-1] - slp[-2], 3),
-                    "Dist20 T": r(dist[-1]), "Dist20 T-1": r(dist[-2]), "Dist20 T-2": r(dist[-3])})
-        recs.append(rec)
-    return pd.DataFrame(recs, columns=["symbol"] + TREND_COLS)
+    px = (md.assign(date=pd.to_datetime(md["date"])).pivot_table(index="date", columns="symbol", values="close", aggfunc="last")
+            .sort_index())
+    px = px.apply(pd.to_numeric, errors="coerce")
+    days = list(px.index[-3:][::-1])                       # newest first: T, T-1, T-2 (trading sessions)
+    lab = [d.strftime("%d-%b") for d in days]
+    pf = px.ffill(limit=3)                                 # a stock missing one session still gets its last traded close as the base
+    chg = (px / pf.shift(1) - 1) * 100                     # vs the last close before that session (blank if it did not trade that day)
+    ma = pf.rolling(MA_N, min_periods=MA_N).mean(); dist = (px / ma - 1) * 100
+    rec = []
+    r = lambda x, k=2: None if x is None or not np.isfinite(x) else round(float(x), k)
+    for sym in px.columns:
+        c = px[sym].ffill(limit=3).dropna().to_numpy(float)
+        row = {"symbol": sym}
+        for d, l in zip(days, lab):
+            row[f"Chg% {l}"] = r(chg.at[d, sym]); row[f"Dist20 {l}"] = r(dist.at[d, sym])
+        if len(c) >= SMMA_N + 2:
+            sm = _smma_arr(c, SMMA_N); slp = (sm[1:] / sm[:-1] - 1) * 100
+            row.update({">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7": r(sm[-1]),
+                        "SMMA7 slp%": r(slp[-1], 3), "Slp chg (pp)": r(slp[-1] - slp[-2], 3)})
+        rec.append(row)
+    cols = ["symbol"] + [f"Chg% {l}" for l in lab] + FIXED_TREND + [f"Dist20 {l}" for l in lab]
+    return pd.DataFrame(rec, columns=cols)
 
 # ── table building ──
 def _vol_mult3(md, days=3, win=20):
@@ -100,7 +116,7 @@ def _order(dash):
     res   = sorted([c for c in dash.columns if re.fullmatch(r"imb_res\d+", c)], key=lambda x: int(x[7:]))
     mid   = [c for c in ("in_imb", "Vol\u00d7", "S/R Flag") if c in dash.columns]
     tail  = [c for c in ("Signal (latest)", "Drivers (latest)", "Patterns (latest)") if c in dash.columns]
-    tr    = [c for c in TREND_COLS if c in dash.columns]          # trend snapshot block, right after the live columns
+    tr    = _trend_cols_in(dash)                                  # trend snapshot block, right after the live columns
     return dash[["symbol"] + strip + LIVE_COLS + tr + vw + sup + res + mid + tail]
 
 def build_tables(G, md):
@@ -191,9 +207,8 @@ def _numfmt(sh, ws, df):
     """Force decimals on the live columns (a sheet column can otherwise display whole numbers)."""
     cols = list(df.columns); pats = {"LTP": "0.00", "Today %": "0.00", "High %": "0.00", "Low %": "0.00",
                                      "CE \u0394%": "0.0", "PE \u0394%": "0.0",
-                                     "Chg% T": "0.00", "Chg% T-1": "0.00", "Chg% T-2": "0.00", "SMMA7": "0.00",
-                                     "SMMA7 slp%": "0.000", "Slp chg (pp)": "0.000",
-                                     "Dist20 T": "0.00", "Dist20 T-1": "0.00", "Dist20 T-2": "0.00"}
+                                     "SMMA7": "0.00", "SMMA7 slp%": "0.000", "Slp chg (pp)": "0.000"}
+    pats.update({c: "0.00" for c in cols if _is_chg(c) or _is_dist(c)})
     reqs = [{"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1,
                                       "startColumnIndex": cols.index(nm), "endColumnIndex": cols.index(nm) + 1},
                             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pat}}},
@@ -308,9 +323,9 @@ def publish(dash, hist, latest, today):
     cols = list(dash.columns); specs = []
     strip = [i for i, c in enumerate(cols) if re.fullmatch(r"\d{2}-\d{2}", str(c))]
     if strip: specs.append((min(strip), max(strip) + 1, -50, 50))
-    for nm in ("Today %", "High %", "Low %", "Chg% T", "Chg% T-1", "Chg% T-2"):
+    for nm in ["Today %", "High %", "Low %"] + [c for c in cols if _is_chg(c)]:
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -5, 5))
-    for nm in ("Dist20 T", "Dist20 T-1", "Dist20 T-2"):
+    for nm in [c for c in cols if _is_dist(c)]:
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -10, 10))
     for nm in ("SMMA7 slp%", "Slp chg (pp)"):
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -1, 1))
