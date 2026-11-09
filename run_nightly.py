@@ -26,6 +26,38 @@ def seed_cache():
         if not os.path.exists(dst) and os.path.exists(src):
             os.makedirs(CACHE_DIR, exist_ok=True); shutil.copy(src, dst); print("seeded", fn)
 
+# ── trend snapshot columns (Chg% T..T-2, >SMMA7, SMMA7 slope + change, Dist20 T..T-2) ──
+# SMMA7 = Wilder smoothed MA seeded with a 7-day SMA; Dist20 = close / 20-day SMA - 1 (%); slope chg = today slope - yesterday slope (pp)
+TREND_COLS = ["Chg% T", "Chg% T-1", "Chg% T-2", ">SMMA7", "SMMA7", "SMMA7 slp%", "Slp chg (pp)",
+              "Dist20 T", "Dist20 T-1", "Dist20 T-2"]
+SMMA_N, MA_N = 7, 20
+
+def _smma(v, n):
+    o = np.full(len(v), np.nan)
+    if len(v) < n: return o
+    o[n - 1] = v[:n].mean()
+    for i in range(n, len(v)): o[i] = (o[i - 1] * (n - 1) + v[i]) / n
+    return o
+
+def trend_frame(md):
+    recs = []
+    for sym, g in md.sort_values(["symbol", "date"]).groupby("symbol"):
+        c = pd.to_numeric(g["close"], errors="coerce").to_numpy(float)
+        c = c[~np.isnan(c)]
+        rec = {"symbol": sym}
+        if len(c) < MA_N + 2:
+            recs.append(rec); continue
+        ch = (c[1:] / c[:-1] - 1) * 100
+        sm = _smma(c, SMMA_N); slp = (sm[1:] / sm[:-1] - 1) * 100
+        ma = pd.Series(c).rolling(MA_N).mean().to_numpy(); dist = (c / ma - 1) * 100
+        r = lambda x, k=2: None if not np.isfinite(x) else round(float(x), k)
+        rec.update({"Chg% T": r(ch[-1]), "Chg% T-1": r(ch[-2]), "Chg% T-2": r(ch[-3]),
+                    ">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7": r(sm[-1]),
+                    "SMMA7 slp%": r(slp[-1], 3), "Slp chg (pp)": r(slp[-1] - slp[-2], 3),
+                    "Dist20 T": r(dist[-1]), "Dist20 T-1": r(dist[-2]), "Dist20 T-2": r(dist[-3])})
+        recs.append(rec)
+    return pd.DataFrame(recs, columns=["symbol"] + TREND_COLS)
+
 # ── table building ──
 def _vol_mult3(md, days=3, win=20):
     """MAX over last `days` days of (volume / trailing 20d SMA volume). >=2 => a high-volume day in last 3."""
@@ -68,7 +100,8 @@ def _order(dash):
     res   = sorted([c for c in dash.columns if re.fullmatch(r"imb_res\d+", c)], key=lambda x: int(x[7:]))
     mid   = [c for c in ("in_imb", "Vol\u00d7", "S/R Flag") if c in dash.columns]
     tail  = [c for c in ("Signal (latest)", "Drivers (latest)", "Patterns (latest)") if c in dash.columns]
-    return dash[["symbol"] + strip + LIVE_COLS + vw + sup + res + mid + tail]
+    tr    = [c for c in TREND_COLS if c in dash.columns]          # trend snapshot block, right after the live columns
+    return dash[["symbol"] + strip + LIVE_COLS + tr + vw + sup + res + mid + tail]
 
 def build_tables(G, md):
     feat = G["build_features"](md)
@@ -76,6 +109,9 @@ def build_tables(G, md):
     ni = G["nearest_imbalances"](feat)
     dash = rule_dash.merge(ni, on="symbol", how="left").merge(_vol_mult3(md), on="symbol", how="left")
     dash = dash.drop(columns=[c for c in ("vwap3 slp", "vwap5 slp") if c in dash.columns]).merge(_vwap_prices(md), on="symbol", how="left")
+    try:
+        dash = dash.merge(trend_frame(md), on="symbol", how="left")
+    except Exception as e: print("trend columns skipped (rest of the sheet unaffected):", e)
     return feat, _order(dash), rule_hist
 
 # ── Google Sheets ──
@@ -154,7 +190,10 @@ def _heat_atm(sh, ws, df):
 def _numfmt(sh, ws, df):
     """Force decimals on the live columns (a sheet column can otherwise display whole numbers)."""
     cols = list(df.columns); pats = {"LTP": "0.00", "Today %": "0.00", "High %": "0.00", "Low %": "0.00",
-                                     "CE \u0394%": "0.0", "PE \u0394%": "0.0"}
+                                     "CE \u0394%": "0.0", "PE \u0394%": "0.0",
+                                     "Chg% T": "0.00", "Chg% T-1": "0.00", "Chg% T-2": "0.00", "SMMA7": "0.00",
+                                     "SMMA7 slp%": "0.000", "Slp chg (pp)": "0.000",
+                                     "Dist20 T": "0.00", "Dist20 T-1": "0.00", "Dist20 T-2": "0.00"}
     reqs = [{"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1,
                                       "startColumnIndex": cols.index(nm), "endColumnIndex": cols.index(nm) + 1},
                             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pat}}},
@@ -269,8 +308,12 @@ def publish(dash, hist, latest, today):
     cols = list(dash.columns); specs = []
     strip = [i for i, c in enumerate(cols) if re.fullmatch(r"\d{2}-\d{2}", str(c))]
     if strip: specs.append((min(strip), max(strip) + 1, -50, 50))
-    for nm in ("Today %", "High %", "Low %"):
+    for nm in ("Today %", "High %", "Low %", "Chg% T", "Chg% T-1", "Chg% T-2"):
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -5, 5))
+    for nm in ("Dist20 T", "Dist20 T-1", "Dist20 T-2"):
+        if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -10, 10))
+    for nm in ("SMMA7 slp%", "Slp chg (pp)"):
+        if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -1, 1))
     if specs: _heat(sh, ws, specs)                      # clears old rules first
     _flag_oversold(sh, ws, dash, strip_only=True)
     _heat_atm(sh, ws, dash)
