@@ -60,9 +60,11 @@ def seed_cache():
 # published yet, the newest header shows the last session that exists (and Run Info shows the same date), so it never mislabels.
 # Chg% = close / previous session's close - 1 (previous = the actual previous market session, not the previous row of that stock).
 # SMMA7 = Wilder smoothed MA seeded with a 7-day SMA; Dist20 = close / 20-day SMA - 1 (%);
-# slope = SMMA7 today vs yesterday (%); slope chg = today's slope - yesterday's slope (percentage points).
+# slope = SMMA7 today vs the day before yesterday (T vs T-2), averaged per session in %, shown as an ANGLE in degrees = atan(%/session)
+# (same convention as the engine's VWAP slope degrees: 1 %/session -> 45 deg). Slope chg = today's angle minus yesterday's angle
+# (yesterday's = T-1 vs T-3), in degrees. The SMMA7 value itself is no longer shown.
 SMMA_N, MA_N = 7, 20
-FIXED_TREND = [">SMMA7", "SMMA7", "SMMA7 slp%", "Slp chg (pp)"]
+FIXED_TREND = [">SMMA7", "SMMA7 slope\u00b0", "Slope chg\u00b0"]
 
 def _is_chg(c): return str(c).startswith("Chg% ")
 def _is_dist(c): return str(c).startswith("Dist20 ")
@@ -94,9 +96,11 @@ def trend_frame(md):
         for d, l in zip(days, lab):
             row[f"Chg% {l}"] = r(chg.at[d, sym]); row[f"Dist20 {l}"] = r(dist.at[d, sym])
         if len(c) >= SMMA_N + 2:
-            sm = _smma_arr(c, SMMA_N); slp = (sm[1:] / sm[:-1] - 1) * 100
-            row.update({">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7": r(sm[-1]),
-                        "SMMA7 slp%": r(slp[-1], 3), "Slp chg (pp)": r(slp[-1] - slp[-2], 3)})
+            sm = _smma_arr(c, SMMA_N)
+            deg = lambda k: math.degrees(math.atan((sm[-1 - k] / sm[-3 - k] - 1) * 100 / 2))   # SMMA now(-k) vs 2 sessions earlier, %/session -> degrees
+            if len(sm) >= SMMA_N + 4 and np.isfinite(sm[-4]):
+                d0, d1 = deg(0), deg(1)                       # today's angle (T vs T-2) and yesterday's angle (T-1 vs T-3)
+                row.update({">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7 slope\u00b0": r(d0, 1), "Slope chg\u00b0": r(d0 - d1, 1)})
         rec.append(row)
     cols = ["symbol"] + [f"Chg% {l}" for l in lab] + FIXED_TREND + [f"Dist20 {l}" for l in lab]
     return pd.DataFrame(rec, columns=cols)
@@ -234,7 +238,7 @@ def _numfmt(sh, ws, df):
     """Force decimals on the live columns (a sheet column can otherwise display whole numbers)."""
     cols = list(df.columns); pats = {"LTP": "0.00", "Today %": "0.00", "High %": "0.00", "Low %": "0.00",
                                      "CE \u0394%": "0.0", "PE \u0394%": "0.0",
-                                     "SMMA7": "0.00", "SMMA7 slp%": "0.000", "Slp chg (pp)": "0.000"}
+                                     "SMMA7 slope\u00b0": "0.0", "Slope chg\u00b0": "0.0"}
     pats.update({c: "0.00" for c in cols if _is_chg(c) or _is_dist(c)})
     reqs = [{"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1,
                                       "startColumnIndex": cols.index(nm), "endColumnIndex": cols.index(nm) + 1},
@@ -354,8 +358,8 @@ def publish(dash, hist, latest, today):
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -5, 5))
     for nm in [c for c in cols if _is_dist(c)]:
         if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -10, 10))
-    for nm in ("SMMA7 slp%", "Slp chg (pp)"):
-        if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -1, 1))
+    for nm, lim in (("SMMA7 slope\u00b0", 60), ("Slope chg\u00b0", 20)):
+        if nm in cols: i = cols.index(nm); specs.append((i, i + 1, -lim, lim))
     if specs: _heat(sh, ws, specs)                      # clears old rules first
     _flag_oversold(sh, ws, dash, strip_only=True)
     _heat_atm(sh, ws, dash)
