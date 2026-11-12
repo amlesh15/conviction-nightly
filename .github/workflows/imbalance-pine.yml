@@ -4,7 +4,11 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write        # commits the generated Pine file back to the repo
+
+concurrency:
+  group: imbalance-pine
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -25,7 +29,14 @@ jobs:
         run: python make_imbalance_pine.py --selftest
       - name: Update level log and build Pine script
         run: python make_imbalance_pine.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: imbalance-levels-pine
-          path: imbalance_levels.pine
+      - name: Save the Pine script in the repo (open it on GitHub and press the copy button, no download)
+        run: |
+          mkdir -p pine
+          cp imbalance_levels.pine pine/imbalance_levels.pine
+          git config user.name  "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add pine/imbalance_levels.pine
+          if git diff --cached --quiet; then echo "Pine script unchanged - nothing to commit"; exit 0; fi
+          git commit -m "imbalance pine: update $(date -u +%F)"
+          for i in 1 2 3; do git pull --rebase -q && git push && exit 0; sleep 5; done
+          exit 1
