@@ -63,14 +63,16 @@ def seed_cache():
 # slope = SMMA7 today vs the day before yesterday (T vs T-2), averaged per session in %, shown as an ANGLE in degrees = atan(%/session)
 # (same convention as the engine's VWAP slope degrees: 1 %/session -> 45 deg). Slope chg = today's angle minus yesterday's angle
 # (yesterday's = T-1 vs T-3), in degrees. The SMMA7 value itself is no longer shown.
+# Vol\u00d7 dd-Mon = that day's volume / its 20-session average volume (window includes the day; same basis as the "Vol\u00d7" alert column): 2.0 = twice normal.
 SMMA_N, MA_N = 7, 20
 FIXED_TREND = [">SMMA7", "SMMA7 slope\u00b0", "Slope chg\u00b0"]
 
 def _is_chg(c): return str(c).startswith("Chg% ")
 def _is_dist(c): return str(c).startswith("Dist20 ")
+def _is_vx(c): return str(c).startswith("Vol\u00d7 ")        # dated volume multiples (distinct from the single max-of-3 "Vol\u00d7" alert column)
 def _trend_cols_in(dash):
     return ([c for c in dash.columns if _is_chg(c)] + FIXED_TREND[:1] + FIXED_TREND[1:] +
-            [c for c in dash.columns if _is_dist(c)])
+            [c for c in dash.columns if _is_dist(c)] + [c for c in dash.columns if _is_vx(c)])
 
 def _smma_arr(v, n):
     o = np.full(len(v), np.nan)
@@ -83,6 +85,10 @@ def trend_frame(md):
     px = (md.assign(date=pd.to_datetime(md["date"])).pivot_table(index="date", columns="symbol", values="close", aggfunc="last")
             .sort_index())
     px = px.apply(pd.to_numeric, errors="coerce")
+    vol = (md.assign(date=pd.to_datetime(md["date"])).pivot_table(index="date", columns="symbol", values="volume", aggfunc="last")
+             .sort_index().apply(pd.to_numeric, errors="coerce").reindex(px.index))
+    vsma = vol.rolling(20, min_periods=5).mean()           # 20-session average volume incl. that day (same basis as the existing Vol\u00d7 column)
+    vx = vol / vsma.replace(0, np.nan)
     days = list(px.index[-3:][::-1])                       # newest first: T, T-1, T-2 (trading sessions)
     lab = [d.strftime("%d-%b") for d in days]
     pf = px.ffill(limit=3)                                 # a stock missing one session still gets its last traded close as the base
@@ -95,6 +101,7 @@ def trend_frame(md):
         row = {"symbol": sym}
         for d, l in zip(days, lab):
             row[f"Chg% {l}"] = r(chg.at[d, sym]); row[f"Dist20 {l}"] = r(dist.at[d, sym])
+            row[f"Vol\u00d7 {l}"] = r(vx.at[d, sym], 1)
         if len(c) >= SMMA_N + 2:
             sm = _smma_arr(c, SMMA_N)
             deg = lambda k: math.degrees(math.atan((sm[-1 - k] / sm[-3 - k] - 1) * 100 / 2))   # SMMA now(-k) vs 2 sessions earlier, %/session -> degrees
@@ -102,7 +109,7 @@ def trend_frame(md):
                 d0, d1 = deg(0), deg(1)                       # today's angle (T vs T-2) and yesterday's angle (T-1 vs T-3)
                 row.update({">SMMA7": "Yes" if c[-1] > sm[-1] else "No", "SMMA7 slope\u00b0": r(d0, 1), "Slope chg\u00b0": r(d0 - d1, 1)})
         rec.append(row)
-    cols = ["symbol"] + [f"Chg% {l}" for l in lab] + FIXED_TREND + [f"Dist20 {l}" for l in lab]
+    cols = ["symbol"] + [f"Chg% {l}" for l in lab] + FIXED_TREND + [f"Dist20 {l}" for l in lab] + [f"Vol\u00d7 {l}" for l in lab]
     return pd.DataFrame(rec, columns=cols)
 
 # ── table building ──
@@ -240,6 +247,7 @@ def _numfmt(sh, ws, df):
                                      "CE \u0394%": "0.0", "PE \u0394%": "0.0",
                                      "SMMA7 slope\u00b0": "0.0", "Slope chg\u00b0": "0.0"}
     pats.update({c: "0.00" for c in cols if _is_chg(c) or _is_dist(c)})
+    pats.update({c: "0.0" for c in cols if _is_vx(c)})
     reqs = [{"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1,
                                       "startColumnIndex": cols.index(nm), "endColumnIndex": cols.index(nm) + 1},
                             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pat}}},
