@@ -14473,5 +14473,20 @@
 "rows": 649,
 "stocks": 218,
 "src": "udiff"
+},
+"2026-11-14": {
+"status": "none"
+},
+"2026-11-15": {
+"status": "none"
+},
+"2026-11-16": {
+"status": "ok",
+"rows": 649,
+"stocks": 218,
+"src": "udiff"
+},
+"2026-11-17": {
+"status": "none"
 }
 }
