@@ -14535,6 +14535,12 @@
 "src": "udiff"
 },
 "2026-11-27": {
+"status": "ok",
+"rows": 651,
+"stocks": 218,
+"src": "udiff"
+},
+"2026-11-28": {
 "status": "none"
 }
 }
